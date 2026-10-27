@@ -22,7 +22,11 @@
 
 Requisitos: Windows 10 (2004) ou Windows 11.
 
-## Rodar (por enquanto, a partir do código)
+## Rodar
+
+O jeito mais fácil: baixe o `NotchUser.exe` na página de [Releases](../../releases) e abra. Não precisa instalar nada.
+
+### A partir do código
 
 1. Instale o **.NET 8 SDK**: https://dotnet.microsoft.com/download/dotnet/8.0
 2. No terminal (PowerShell), dentro desta pasta:
@@ -34,7 +38,7 @@ dotnet run
 Para gerar um `NotchUser.exe` único, que roda sem instalar o .NET:
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o dist
 ```
 
 O executável fica em `dist\NotchUser.exe`. Na primeira vez o Windows pode mostrar "O Windows protegeu o computador": clique em **Mais informações → Executar assim mesmo** (o app não é assinado por um certificado pago).
