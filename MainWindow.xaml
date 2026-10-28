@@ -44,6 +44,9 @@
             <Border.RenderTransform>
                 <ScaleTransform x:Name="NotchScale"/>
             </Border.RenderTransform>
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="22" ShadowDepth="6" Direction="270" Opacity="0.45"/>
+            </Border.Effect>
             <Grid>
                 <!-- Collapsed: cover, title, bars (or shelf count) -->
                 <Grid x:Name="Collapsed" Margin="8,0">
@@ -74,7 +77,7 @@
                 </StackPanel>
 
                 <!-- Expanded panel -->
-                <StackPanel x:Name="Expanded" Margin="22,14,22,12" Visibility="Collapsed">
+                <StackPanel x:Name="Expanded" Margin="22,14,22,12" Visibility="Collapsed" RenderTransformOrigin="0.5,0">
                     <StackPanel x:Name="MediaSection">
                         <Grid>
                             <Grid.ColumnDefinitions>

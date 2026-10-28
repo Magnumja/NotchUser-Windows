@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Media.Animation;
 
 namespace NotchUser;
 
@@ -18,9 +17,6 @@ public partial class App : Application
             Shutdown();
             return;
         }
-
-        // 30 fps is plenty for the little bars; size animations ask for 60 themselves.
-        Timeline.DesiredFrameRateProperty.OverrideMetadata(typeof(Timeline), new FrameworkPropertyMetadata { DefaultValue = 30 });
 
         new MainWindow().Show();
         if (!Settings.Current.Onboarded) new OnboardingWindow().Show();

@@ -41,9 +41,8 @@ public partial class MainWindow : Window
     private Point _pressPoint;
     private readonly List<Rectangle> _bars = new();
     private readonly Random _random = new();
-    private readonly DropShadowEffect _shadow = new() { BlurRadius = 22, ShadowDepth = 6, Direction = 270, Opacity = 0.45 };
     private bool _toast;
-    private int _sizeToken;
+    private readonly HashSet<ShelfEntry> _shownEntries = new();
     // What's on screen now, so Refresh only redoes what changed.
     private BitmapSource? _shownCover;
     private Color _accent = Colors.White;
@@ -93,6 +92,7 @@ public partial class MainWindow : Window
         Notch.DragLeave += OnDragLeave;
         Notch.Drop += OnDrop;
 
+        foreach (var b in new UIElement[] { PrevButton, PlayButton, NextButton, TrashButton }) AddPressEffect(b);
         PrevButton.Click += (_, _) => _media.Previous();
         NextButton.Click += (_, _) => _media.Next();
         PlayButton.Click += (_, _) => _media.PlayPause();
@@ -126,7 +126,7 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
-            ResizeWindow(Width, Height);
+            CenterWindow();
             Top = 0;
             ApplyLanguage();
             Refresh();
@@ -210,6 +210,7 @@ public partial class MainWindow : Window
         _toastTimer.Stop();
         _toastTimer.Start();
         Refresh();
+        GrowIn(ToastSection, 0.05);
         Bump();
     }
 
@@ -228,6 +229,43 @@ public partial class MainWindow : Window
         _expanded = expanded;
         if (expanded) _progressTick.Start(); else _progressTick.Stop();
         Refresh();
+        if (expanded) GrowIn(Expanded, 0.05); else FadeIn(Collapsed, 0.2);
+    }
+
+    /// <summary>Content appearing from the top: fades in while scaling up from 90%.</summary>
+    private static void GrowIn(UIElement element, double delay = 0)
+    {
+        if (element.RenderTransform is not ScaleTransform scale)
+            element.RenderTransform = scale = new ScaleTransform();
+        element.Opacity = 0;
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { BeginTime = TimeSpan.FromSeconds(delay) };
+        Timeline.SetDesiredFrameRate(fade, 60);
+        element.BeginAnimation(OpacityProperty, fade);
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.4, 0.8, delay, 0.9));
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.4, 0.8, delay, 0.9));
+    }
+
+    private static void FadeIn(UIElement element, double seconds)
+    {
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromSeconds(seconds));
+        Timeline.SetDesiredFrameRate(fade, 60);
+        element.BeginAnimation(OpacityProperty, fade);
+    }
+
+    /// <summary>Buttons squish a little while pressed, then spring back.</summary>
+    private static void AddPressEffect(UIElement element)
+    {
+        var scale = new ScaleTransform();
+        element.RenderTransform = scale;
+        element.RenderTransformOrigin = new Point(0.5, 0.5);
+        void To(double v, double damping)
+        {
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(v, 0.25, damping));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(v, 0.25, damping));
+        }
+        element.PreviewMouseLeftButtonDown += (_, _) => To(0.86, 0.6);
+        element.PreviewMouseLeftButtonUp += (_, _) => To(1, 0.6);
+        element.MouseLeave += (_, _) => To(1, 0.8);
     }
 
     private void Refresh()
@@ -285,40 +323,13 @@ public partial class MainWindow : Window
 
     private void AnimateSize(double width, double height)
     {
-        var big = _expanded || _toast;
-        Notch.CornerRadius = big ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
-        // The shadow costs a blur on every frame; the small pill doesn't need it.
-        Notch.Effect = big ? _shadow : null;
-
-        // The (transparent) window is only as big as needed: a small window is much
-        // cheaper to redraw while the bars move. Grow it first, shrink it after the animation.
-        var (winW, winH) = _expanded && !_toast ? (560.0, 340.0) : (width + 40, height + 30);
-        var token = ++_sizeToken;
-        if (winW > Width || winH > Height) ResizeWindow(Math.Max(winW, Width), Math.Max(winH, Height));
-
-        if (Notch.Width == width && Notch.Height == height && !Notch.HasAnimatedProperties)
-        {
-            ResizeWindow(winW, winH);
-            return;
-        }
-        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var duration = TimeSpan.FromMilliseconds(280);
-        var w = new DoubleAnimation(width, duration) { EasingFunction = ease };
-        var h = new DoubleAnimation(height, duration) { EasingFunction = ease };
-        Timeline.SetDesiredFrameRate(w, 60);
-        Timeline.SetDesiredFrameRate(h, 60);
-        h.Completed += (_, _) => { if (token == _sizeToken) ResizeWindow(winW, winH); };
-        Notch.BeginAnimation(WidthProperty, w);
-        Notch.BeginAnimation(HeightProperty, h);
+        Notch.CornerRadius = _expanded || _toast ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
+        // Same spring as the Mac notch opening: quick, with a hint of overshoot.
+        Notch.BeginAnimation(WidthProperty, SpringEase.To(width, 0.42, 0.76));
+        Notch.BeginAnimation(HeightProperty, SpringEase.To(height, 0.4, 0.8));
     }
 
-    /// <summary>Resize the window around the notch, keeping it centered at the top.</summary>
-    private void ResizeWindow(double width, double height)
-    {
-        Width = width;
-        Height = height;
-        Left = (SystemParameters.PrimaryScreenWidth - width) / 2;
-    }
+    private void CenterWindow() => Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
 
     private void UpdateProgress()
     {
@@ -420,18 +431,32 @@ public partial class MainWindow : Window
     /// <summary>Quick squash-and-stretch, like the island reacting to something new.</summary>
     private void Bump()
     {
-        var ease = new ElasticEase { Oscillations = 2, Springiness = 4, EasingMode = EasingMode.EaseOut };
-        var x = new DoubleAnimation(1.08, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease };
-        var y = new DoubleAnimation(1.16, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease };
-        Timeline.SetDesiredFrameRate(x, 60);
-        Timeline.SetDesiredFrameRate(y, 60);
-        NotchScale.BeginAnimation(ScaleTransform.ScaleXProperty, x);
-        NotchScale.BeginAnimation(ScaleTransform.ScaleYProperty, y);
+        // Mac: scale to 1.07 x 1.16 and back on a bouncy spring (response 0.22, damping 0.32).
+        foreach (var (prop, peak) in new[] { (ScaleTransform.ScaleXProperty, 1.07), (ScaleTransform.ScaleYProperty, 1.16) })
+        {
+            var spring = new SpringEase(0.22, 0.32);
+            var up = TimeSpan.FromMilliseconds(90);
+            var a = new DoubleAnimationUsingKeyFrames();
+            a.KeyFrames.Add(new EasingDoubleKeyFrame(peak, KeyTime.FromTimeSpan(up), new QuadraticEase { EasingMode = EasingMode.EaseOut }));
+            a.KeyFrames.Add(new EasingDoubleKeyFrame(1, KeyTime.FromTimeSpan(up + spring.Duration), spring));
+            Timeline.SetDesiredFrameRate(a, 60);
+            NotchScale.BeginAnimation(prop, a);
+        }
     }
 
     private void OnTrackChanged()
     {
         Bump();
+        // New song: the texts slide up into place and the cover fades over, as on the Mac.
+        foreach (var text in new FrameworkElement[] { TitleText, ArtistText, PillTitle })
+        {
+            if (text.RenderTransform is not TranslateTransform move) text.RenderTransform = move = new TranslateTransform();
+            var slide = new DoubleAnimation(8, 0, TimeSpan.FromMilliseconds(300)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } };
+            Timeline.SetDesiredFrameRate(slide, 60);
+            move.BeginAnimation(TranslateTransform.YProperty, slide);
+            FadeIn(text, 0.3);
+        }
+        foreach (var cover in new UIElement[] { BigCover, PillCover }) FadeIn(cover, 0.3);
         if (!Settings.Current.PeekOnTrackChange || _expanded) return;
         SetExpanded(true);
         _peekTimer.Start();
@@ -476,7 +501,22 @@ public partial class MainWindow : Window
     {
         _shelfKey = ShelfKey();
         ShelfItems.Children.Clear();
-        foreach (var entry in _shelf.Items) ShelfItems.Children.Add(ShelfItemView(entry));
+        var first = _shownEntries.Count == 0;
+        foreach (var entry in _shelf.Items)
+        {
+            var view = ShelfItemView(entry);
+            ShelfItems.Children.Add(view);
+            if (first || _shownEntries.Contains(entry)) continue;
+            // Something new on the shelf pops in (Mac: scale from 60% with a fade).
+            var scale = new ScaleTransform();
+            view.RenderTransform = scale;
+            view.RenderTransformOrigin = new Point(0.5, 0.5);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.35, 0.75, 0, 0.6));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.35, 0.75, 0, 0.6));
+            FadeIn(view, 0.25);
+        }
+        _shownEntries.Clear();
+        _shownEntries.UnionWith(_shelf.Items);
         TrashButton.ToolTip = _selected.Count > 0 ? L("removeSelected") : L("clearShelf");
     }
 

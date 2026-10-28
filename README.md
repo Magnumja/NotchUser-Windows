@@ -22,7 +22,8 @@
   > Vem desligado: ligue na apresentação ou nos **Ajustes**.
 - **Apresentação** na primeira vez que abre: o que o app faz, idioma e complementos.
 - **Ajustes** (botão direito na pílula → **Ajustes…**): idioma (Sistema, Português, English, Español), complementos, mostrar ao trocar de música e abrir ao iniciar o Windows.
-- **Leve**: a janela só tem o tamanho da pílula enquanto ela está fechada, as animações rodam a 30 fps (60 só nas transições), a sombra só existe com o painel aberto e a capa é guardada pequena na memória.
+- **Animações como no Mac**: o painel abre com a mesma mola do Mac (cresce com um leve passo além e assenta), o conteúdo entra crescendo do topo, botões afundam ao clicar, itens novos pulam na prateleira e o título desliza ao trocar de música. Tudo a 60 fps.
+- **Leve**: a cor do álbum, os players e a prateleira só são refeitos quando algo muda, e a capa é guardada pequena na memória.
 
 Requisitos: Windows 10 (2004) ou Windows 11.
 
