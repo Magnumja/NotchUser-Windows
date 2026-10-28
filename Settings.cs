@@ -9,8 +9,15 @@ public sealed class Settings
 {
     public string Language { get; set; } = "system";
     public bool PeekOnTrackChange { get; set; } = true;
+    /// <summary>The welcome walkthrough has been seen.</summary>
+    public bool Onboarded { get; set; }
+    /// <summary>Add-on: copy text from the screen with Ctrl+Shift+2 (off until turned on).</summary>
+    public bool OcrEnabled { get; set; }
 
     public static Settings Current { get; } = Load();
+
+    /// <summary>Raised after any setting changes, so every window can follow.</summary>
+    public static event Action? Changed;
 
     public static string Folder =>
         System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NotchUser");
@@ -27,6 +34,7 @@ public sealed class Settings
     {
         Directory.CreateDirectory(Folder);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        Changed?.Invoke();
     }
 
     // "Start with Windows" lives in the registry, not in the settings file.
@@ -46,6 +54,7 @@ public sealed class Settings
                 key.SetValue("NotchUser", $"\"{exe}\"");
             else
                 key.DeleteValue("NotchUser", false);
+            Changed?.Invoke();
         }
     }
 }

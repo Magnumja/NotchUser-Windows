@@ -18,7 +18,11 @@
 - **Funciona com tudo que aparece nos controles de mídia do Windows**: Spotify, Chrome, Edge, Firefox, Media Player…
 - **Prateleira**: arraste arquivos, links ou texto até a pílula para guardar; depois arraste para onde quiser. Clique para selecionar vários; dois cliques abrem; botão direito tem Abrir, Mostrar no Explorador, Copiar e Tirar.
 - **"Pulinho"** quando a música troca, e o painel abre rapidinho para avisar.
-- **Botão direito na pílula**: idioma (Sistema, Português, English, Español), abrir ao iniciar o Windows, mostrar ao trocar de música, limpar prateleira e sair.
+- **Complemento: copiar texto da tela.** Aperte **Ctrl+Shift+2**, arraste sobre qualquer pedaço da tela (vídeo, imagem, PDF travado, slide numa chamada) e o texto vai direto para a área de transferência. Usa o reconhecimento de texto do próprio Windows, sem internet; a imagem não é salva.
+  > Vem desligado: ligue na apresentação ou nos **Ajustes**.
+- **Apresentação** na primeira vez que abre: o que o app faz, idioma e complementos.
+- **Ajustes** (botão direito na pílula → **Ajustes…**): idioma (Sistema, Português, English, Español), complementos, mostrar ao trocar de música e abrir ao iniciar o Windows.
+- **Leve**: a janela só tem o tamanho da pílula enquanto ela está fechada, as animações rodam a 30 fps (60 só nas transições), a sombra só existe com o painel aberto e a capa é guardada pequena na memória.
 
 Requisitos: Windows 10 (2004) ou Windows 11.
 
@@ -49,6 +53,8 @@ O executável fica em `dist\NotchUser.exe`. Na primeira vez o Windows pode mostr
 - `MediaService.cs`: lê o que está tocando pelos controles de mídia do próprio Windows.
 - `Shelf.cs`: a prateleira (salva em `%AppData%\NotchUser\shelf.json`).
 - `Settings.cs`, `Strings.cs`: ajustes e textos em português, inglês e espanhol.
+- `OnboardingWindow.cs`, `SettingsWindow.cs`, `Ui.cs`: a apresentação, os Ajustes e as peças visuais deles (estilos em `App.xaml`).
+- `ScreenText.cs`: copiar texto da tela (captura, seleção e reconhecimento).
 
 ## Licença
 

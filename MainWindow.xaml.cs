@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _progressTick = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly DispatcherTimer _barsTick = new() { Interval = TimeSpan.FromMilliseconds(240) };
     private readonly DispatcherTimer _peekTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    private readonly DispatcherTimer _toastTimer = new() { Interval = TimeSpan.FromSeconds(2.8) };
 
     private bool _expanded;
     private bool _dragging;      // something is being dragged over the notch
@@ -40,6 +41,14 @@ public partial class MainWindow : Window
     private Point _pressPoint;
     private readonly List<Rectangle> _bars = new();
     private readonly Random _random = new();
+    private readonly DropShadowEffect _shadow = new() { BlurRadius = 22, ShadowDepth = 6, Direction = 270, Opacity = 0.45 };
+    private bool _toast;
+    private int _sizeToken;
+    // What's on screen now, so Refresh only redoes what changed.
+    private BitmapSource? _shownCover;
+    private Color _accent = Colors.White;
+    private bool? _shownTinted;
+    private string? _sourcesKey, _shelfKey;
     private static readonly FontFamily IconFont = new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
     public MainWindow()
@@ -75,6 +84,7 @@ public partial class MainWindow : Window
             _peekTimer.Stop();
             if (!Notch.IsMouseOver && !_dragging && !_menuOpen) SetExpanded(false);
         };
+        _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); _toast = false; Refresh(); };
         _progressTick.Tick += (_, _) => UpdateProgress();
         _barsTick.Tick += (_, _) => AnimateBars();
 
@@ -107,10 +117,16 @@ public partial class MainWindow : Window
 
         _media.Changed += Refresh;
         _media.TrackChanged += OnTrackChanged;
+        Settings.Changed += () =>
+        {
+            ApplyLanguage();
+            UpdateHotKey();
+            Refresh();
+        };
 
         Loaded += async (_, _) =>
         {
-            Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
+            ResizeWindow(Width, Height);
             Top = 0;
             ApplyLanguage();
             Refresh();
@@ -124,7 +140,81 @@ public partial class MainWindow : Window
         base.OnSourceInitialized(e);
         var handle = new WindowInteropHelper(this).Handle;
         SetWindowLong(handle, GWL_EXSTYLE, GetWindowLong(handle, GWL_EXSTYLE) | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+        HwndSource.FromHwnd(handle)?.AddHook(WndProc);
+        UpdateHotKey();
     }
+
+    // MARK: - Copy text from the screen (Ctrl+Shift+2)
+
+    private const int WM_HOTKEY = 0x0312, HotKeyId = 1;
+    private const uint MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_NOREPEAT = 0x4000, VK_2 = 0x32;
+    private bool _hotKeyOn;
+
+    private void UpdateHotKey()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        var want = Settings.Current.OcrEnabled;
+        if (want == _hotKeyOn) return;
+        if (want)
+        {
+            _hotKeyOn = RegisterHotKey(handle, HotKeyId, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_2);
+            if (!_hotKeyOn) ShowToast("\uE7BA", L("shortcutTaken"), "");
+        }
+        else
+        {
+            UnregisterHotKey(handle, HotKeyId);
+            _hotKeyOn = false;
+        }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_HOTKEY && wParam.ToInt32() == HotKeyId)
+        {
+            // Leave the window procedure before opening the selection overlay.
+            Dispatcher.BeginInvoke(CopyTextFromScreen);
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
+    private async void CopyTextFromScreen()
+    {
+        if (!Settings.Current.OcrEnabled) return;
+        // Don't freeze the open panel into the snapshot.
+        if (_expanded)
+        {
+            SetExpanded(false);
+            await Task.Delay(300);
+        }
+        var text = await ScreenText.CaptureAsync();
+        if (text == null) return;
+        if (text.Length == 0)
+        {
+            ShowToast("\uE7BA", L("noTextFound"), L("noTextHint"), Color.FromRgb(0xFB, 0xBF, 0x24));
+            return;
+        }
+        try { Clipboard.SetText(text); } catch { }
+        ShowToast("\uE73E", L("textCopied"), text.ReplaceLineEndings(" "));
+    }
+
+    private void ShowToast(string glyph, string title, string detail, Color? color = null)
+    {
+        ToastIcon.Text = glyph;
+        ToastIcon.Foreground = new SolidColorBrush(color ?? Color.FromRgb(0x4A, 0xDE, 0x80));
+        ToastTitle.Text = title;
+        ToastDetail.Text = detail;
+        ToastDetail.Visibility = detail.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _toast = true;
+        _toastTimer.Stop();
+        _toastTimer.Start();
+        Refresh();
+        Bump();
+    }
+
+    [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
+    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     private const int GWL_EXSTYLE = -20, WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x80;
     [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int index);
@@ -147,8 +237,10 @@ public partial class MainWindow : Window
         var showShelf = hasShelf || _dragging;
         var showMedia = hasMedia && !_dragging;
 
-        Collapsed.Visibility = _expanded ? Visibility.Collapsed : Visibility.Visible;
-        Expanded.Visibility = _expanded ? Visibility.Visible : Visibility.Collapsed;
+        var open = _expanded && !_toast;
+        Collapsed.Visibility = !_expanded && !_toast ? Visibility.Visible : Visibility.Collapsed;
+        Expanded.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        ToastSection.Visibility = _toast ? Visibility.Visible : Visibility.Collapsed;
 
         // Pill
         PillCover.Visibility = PillTitle.Visibility = hasMedia ? Visibility.Visible : Visibility.Collapsed;
@@ -170,14 +262,16 @@ public partial class MainWindow : Window
         ArtistText.Visibility = _media.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         PlayButton.Content = _media.Playing ? "" : "";
         SetCover(_media.Cover);
-        RebuildSources();
-        RebuildShelf();
+        var sourcesKey = string.Join("|", _media.Sessions.Select(x => x.SourceAppUserModelId)) + "|" + _media.SourceId;
+        if (sourcesKey != _sourcesKey) RebuildSources();
+        if (ShelfKey() != _shelfKey) RebuildShelf();
         UpdateProgress();
 
         if (_media.Playing && hasMedia) _barsTick.Start(); else StopBars();
 
         double width, height;
-        if (_expanded)
+        if (_toast) (width, height) = (320, 58);
+        else if (_expanded)
         {
             width = 460;
             height = 26 + (showMedia ? 150 : 0) + (showShelf ? 84 : 0) + (showMedia && showShelf ? 21 : 0)
@@ -191,11 +285,39 @@ public partial class MainWindow : Window
 
     private void AnimateSize(double width, double height)
     {
+        var big = _expanded || _toast;
+        Notch.CornerRadius = big ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
+        // The shadow costs a blur on every frame; the small pill doesn't need it.
+        Notch.Effect = big ? _shadow : null;
+
+        // The (transparent) window is only as big as needed: a small window is much
+        // cheaper to redraw while the bars move. Grow it first, shrink it after the animation.
+        var (winW, winH) = _expanded && !_toast ? (560.0, 340.0) : (width + 40, height + 30);
+        var token = ++_sizeToken;
+        if (winW > Width || winH > Height) ResizeWindow(Math.Max(winW, Width), Math.Max(winH, Height));
+
+        if (Notch.Width == width && Notch.Height == height && !Notch.HasAnimatedProperties)
+        {
+            ResizeWindow(winW, winH);
+            return;
+        }
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
         var duration = TimeSpan.FromMilliseconds(280);
-        Notch.BeginAnimation(WidthProperty, new DoubleAnimation(width, duration) { EasingFunction = ease });
-        Notch.BeginAnimation(HeightProperty, new DoubleAnimation(height, duration) { EasingFunction = ease });
-        Notch.CornerRadius = _expanded ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
+        var w = new DoubleAnimation(width, duration) { EasingFunction = ease };
+        var h = new DoubleAnimation(height, duration) { EasingFunction = ease };
+        Timeline.SetDesiredFrameRate(w, 60);
+        Timeline.SetDesiredFrameRate(h, 60);
+        h.Completed += (_, _) => { if (token == _sizeToken) ResizeWindow(winW, winH); };
+        Notch.BeginAnimation(WidthProperty, w);
+        Notch.BeginAnimation(HeightProperty, h);
+    }
+
+    /// <summary>Resize the window around the notch, keeping it centered at the top.</summary>
+    private void ResizeWindow(double width, double height)
+    {
+        Width = width;
+        Height = height;
+        Left = (SystemParameters.PrimaryScreenWidth - width) / 2;
     }
 
     private void UpdateProgress()
@@ -218,17 +340,27 @@ public partial class MainWindow : Window
 
     private void SetCover(BitmapSource? cover)
     {
+        var tinted = _expanded && cover != null;
+        if (ReferenceEquals(cover, _shownCover) && tinted == _shownTinted) return;
+        if (!ReferenceEquals(cover, _shownCover))
+        {
+            _shownCover = cover;
+            _accent = cover == null ? Colors.White : AlbumColor(cover);
+            var accentBrush = new SolidColorBrush(_accent);
+            accentBrush.Freeze();
+            foreach (var bar in _bars) bar.Fill = accentBrush;
+        }
+        _shownTinted = tinted;
+
         Brush brush = cover == null
             ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
             : new ImageBrush(cover) { Stretch = Stretch.UniformToFill };
         PillCover.Background = brush;
         BigCover.Background = brush;
 
-        var accent = cover == null ? Colors.White : AlbumColor(cover);
-        var accentBrush = new SolidColorBrush(accent);
-        foreach (var bar in _bars) bar.Fill = accentBrush;
+        var accent = _accent;
         // The panel picks up a tint of the cover, fading into black.
-        Notch.Background = _expanded && cover != null
+        Notch.Background = tinted
             ? new LinearGradientBrush(Color.FromArgb(0xF5, (byte)(accent.R * 0.3), (byte)(accent.G * 0.3), (byte)(accent.B * 0.3)),
                                       Color.FromArgb(0xF5, 0x0B, 0x0B, 0x0F), 90)
             : new SolidColorBrush(Color.FromArgb(0xF5, 0x0B, 0x0B, 0x0F));
@@ -269,7 +401,8 @@ public partial class MainWindow : Window
 
     private void AnimateBars()
     {
-        foreach (var bar in _bars)
+        // Only the set that can be seen: the pill's four or the panel's four.
+        foreach (var bar in _expanded ? _bars.Skip(4) : _bars.Take(4))
         {
             if (bar.RenderTransform is not ScaleTransform scale) continue;
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.3 + _random.NextDouble() * 0.7,
@@ -288,8 +421,12 @@ public partial class MainWindow : Window
     private void Bump()
     {
         var ease = new ElasticEase { Oscillations = 2, Springiness = 4, EasingMode = EasingMode.EaseOut };
-        NotchScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.08, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease });
-        NotchScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.16, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease });
+        var x = new DoubleAnimation(1.08, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease };
+        var y = new DoubleAnimation(1.16, 1, TimeSpan.FromMilliseconds(520)) { EasingFunction = ease };
+        Timeline.SetDesiredFrameRate(x, 60);
+        Timeline.SetDesiredFrameRate(y, 60);
+        NotchScale.BeginAnimation(ScaleTransform.ScaleXProperty, x);
+        NotchScale.BeginAnimation(ScaleTransform.ScaleYProperty, y);
     }
 
     private void OnTrackChanged()
@@ -306,6 +443,7 @@ public partial class MainWindow : Window
     {
         Sources.Children.Clear();
         var sessions = _media.Sessions;
+        _sourcesKey = string.Join("|", sessions.Select(x => x.SourceAppUserModelId)) + "|" + _media.SourceId;
         if (sessions.Count < 2) return;
         foreach (var s in sessions)
         {
@@ -330,8 +468,13 @@ public partial class MainWindow : Window
 
     // MARK: - Shelf
 
+    /// <summary>Changes whenever the shelf would look different (items, selection, language).</summary>
+    private string ShelfKey() =>
+        Resolved + "\n" + string.Join("\n", _shelf.Items.Select(e => (_selected.Contains(e) ? "*" : "") + e.Kind + ":" + e.Value));
+
     private void RebuildShelf()
     {
+        _shelfKey = ShelfKey();
         ShelfItems.Children.Clear();
         foreach (var entry in _shelf.Items) ShelfItems.Children.Add(ShelfItemView(entry));
         TrashButton.ToolTip = _selected.Count > 0 ? L("removeSelected") : L("clearShelf");
@@ -535,6 +678,14 @@ public partial class MainWindow : Window
     {
         var menu = Notch.ContextMenu!;
         menu.Items.Clear();
+        menu.Items.Add(Item(L("settings"), SettingsWindow.ShowOrFocus));
+        if (Settings.Current.OcrEnabled)
+        {
+            var copy = Item(L("copyTextFromScreen"), () => Dispatcher.BeginInvoke(CopyTextFromScreen));
+            copy.InputGestureText = "Ctrl+Shift+2";
+            menu.Items.Add(copy);
+        }
+        menu.Items.Add(new Separator());
 
         var language = new MenuItem { Header = L("language") };
         foreach (var code in Strings.Languages)
@@ -543,8 +694,6 @@ public partial class MainWindow : Window
             {
                 Settings.Current.Language = code;
                 Settings.Current.Save();
-                ApplyLanguage();
-                Refresh();
             }, Settings.Current.Language == code));
         }
         menu.Items.Add(language);

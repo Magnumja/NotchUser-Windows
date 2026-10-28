@@ -135,6 +135,7 @@ public sealed class MediaService
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.DecodePixelWidth = 160;  // the biggest it's ever shown is 58 px
             bitmap.StreamSource = memory;
             bitmap.EndInit();
             bitmap.Freeze();

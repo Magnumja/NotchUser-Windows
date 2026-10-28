@@ -44,9 +44,6 @@
             <Border.RenderTransform>
                 <ScaleTransform x:Name="NotchScale"/>
             </Border.RenderTransform>
-            <Border.Effect>
-                <DropShadowEffect BlurRadius="22" ShadowDepth="6" Direction="270" Opacity="0.45"/>
-            </Border.Effect>
             <Grid>
                 <!-- Collapsed: cover, title, bars (or shelf count) -->
                 <Grid x:Name="Collapsed" Margin="8,0">
@@ -64,6 +61,17 @@
                         <TextBlock x:Name="PillShelfCount" Margin="5,0,0,0" Foreground="#D9FFFFFF" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Grid>
+
+                <!-- A short message ("Text copied"), shown for a few seconds -->
+                <StackPanel x:Name="ToastSection" Orientation="Horizontal" Margin="18,0" VerticalAlignment="Center"
+                            HorizontalAlignment="Center" Visibility="Collapsed">
+                    <TextBlock x:Name="ToastIcon" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="20"
+                               Foreground="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                    <StackPanel VerticalAlignment="Center" MaxWidth="250">
+                        <TextBlock x:Name="ToastTitle" Foreground="White" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="ToastDetail" Foreground="#99FFFFFF" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </StackPanel>
 
                 <!-- Expanded panel -->
                 <StackPanel x:Name="Expanded" Margin="22,14,22,12" Visibility="Collapsed">
