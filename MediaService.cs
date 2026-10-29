@@ -169,6 +169,43 @@ public sealed class MediaService
         catch { }
     }
 
+    public static bool IsPlaying(GlobalSystemMediaTransportControlsSession session)
+    {
+        try { return session.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing; }
+        catch { return false; }
+    }
+
+    /// <summary>Bring the app that's playing to the front (or open it), like clicking the cover on the Mac.</summary>
+    public void OpenPlayer(string? sourceId = null)
+    {
+        var id = sourceId ?? SourceId;
+        if (id.Length == 0) return;
+        foreach (var name in ProcessNames(id))
+        {
+            foreach (var p in ShellImage.ProcessesFor(name))
+            {
+                if (p.MainWindowHandle == IntPtr.Zero) continue;
+                Native.BringToFront(p.MainWindowHandle);
+                return;
+            }
+        }
+        try { System.Diagnostics.Process.Start("explorer.exe", @"shell:AppsFolder\" + id); } catch { }
+    }
+
+    private static IEnumerable<string> ProcessNames(string sourceId)
+    {
+        yield return Path.GetFileNameWithoutExtension(sourceId.Split('!')[0]);
+        switch (AppName(sourceId))
+        {
+            case "Chrome": yield return "chrome"; break;
+            case "Edge": yield return "msedge"; break;
+            case "Firefox": yield return "firefox"; break;
+            case "Opera": yield return "opera"; break;
+            case "Spotify": yield return "Spotify"; break;
+            case "Media Player": yield return "Microsoft.Media.Player"; break;
+        }
+    }
+
     /// <summary>Show this app's music (until another app starts playing).</summary>
     public void Pin(string sourceId)
     {

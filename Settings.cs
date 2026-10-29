@@ -9,7 +9,13 @@ namespace NotchUser;
 public sealed class Settings
 {
     public string Language { get; set; } = "system";
-    public bool PeekOnTrackChange { get; set; } = true;
+    /// <summary>
+    /// Open the notch for a moment when the song changes. Off by default, as on the Mac: opening
+    /// at every song gets in the way (the closed notch still gives a small hop).
+    /// </summary>
+    public bool PeekOnTrackChange { get; set; }
+    /// <summary>How the notch looks: "basic" (plain black), "elevated" (depth and glow) or "glass".</summary>
+    public string Style { get; set; } = "basic";
     /// <summary>The welcome walkthrough has been seen.</summary>
     public bool Onboarded { get; set; }
     /// <summary>Add-on: copy text from the screen with Ctrl+Shift+2 (off until turned on).</summary>
@@ -22,8 +28,9 @@ public sealed class Settings
     public bool Notices { get; set; } = true;
     /// <summary>Notch size: 0 = automatic, else a scale like 1.15.</summary>
     public double Size { get; set; }
-    /// <summary>Closed pill shows only the cover and the bars, no title.</summary>
-    public bool CompactPill { get; set; }
+
+    public bool Lifted => Style != "basic";
+    public bool Glass => Style == "glass";
 
     /// <summary>The scale actually used: the chosen one, or one that suits the screen.</summary>
     public double Scale => Size > 0 ? Size : SystemParameters.PrimaryScreenWidth >= 2400 ? 1.15 : 1.0;
