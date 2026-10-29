@@ -13,7 +13,7 @@
     <AssemblyName>NotchUser</AssemblyName>
     <RootNamespace>NotchUser</RootNamespace>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Product>NotchUser</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Lighter on memory: no background GC thread, and only the UI languages we ship. -->

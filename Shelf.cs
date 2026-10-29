@@ -25,15 +25,18 @@ public sealed class Shelf
 
     public static Shelf Load()
     {
-        var shelf = new Shelf();
-        try
-        {
-            var items = JsonSerializer.Deserialize<List<ShelfEntry>>(File.ReadAllText(FilePath)) ?? new();
-            // Files moved or deleted elsewhere drop off the shelf.
-            shelf.Items = items.Where(e => e.Kind != "file" || File.Exists(e.Value) || Directory.Exists(e.Value)).ToList();
-        }
-        catch { }
-        return shelf;
+        var items = Settings.ReadJson<List<ShelfEntry>>(FilePath) ?? new();
+        return new Shelf { Items = items.Where(e => e.Kind != "file" || Exists(e.Value)).ToList() };
+    }
+
+    private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
+
+    /// <summary>Files moved or deleted elsewhere drop off the shelf. True if anything went.</summary>
+    public bool Prune()
+    {
+        var gone = Items.RemoveAll(e => e.Kind == "file" && !Exists(e.Value));
+        if (gone > 0) Save();
+        return gone > 0;
     }
 
     public bool Add(ShelfEntry e)
@@ -57,9 +60,5 @@ public sealed class Shelf
         Save();
     }
 
-    private void Save()
-    {
-        Directory.CreateDirectory(Settings.Folder);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(Items));
-    }
+    private void Save() => Settings.WriteJson(FilePath, JsonSerializer.Serialize(Items));
 }

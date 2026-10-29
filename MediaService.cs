@@ -21,6 +21,7 @@ public sealed class MediaService
 
     public string Title { get; private set; } = "";
     public string Artist { get; private set; } = "";
+    public string Album { get; private set; } = "";
     public bool Playing { get; private set; }
     public double Duration { get; private set; }
     public BitmapSource? Cover { get; private set; }
@@ -85,7 +86,7 @@ public sealed class MediaService
         var session = _session;
         if (session == null)
         {
-            Title = Artist = "";
+            Title = Artist = Album = "";
             Playing = false;
             Cover = null;
             _trackKey = "";
@@ -101,6 +102,7 @@ public sealed class MediaService
 
             Title = props?.Title ?? "";
             Artist = props?.Artist ?? "";
+            Album = props?.AlbumTitle ?? "";
             Playing = info?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
             Duration = (timeline.EndTime - timeline.StartTime).TotalSeconds;
             _position = timeline.Position.TotalSeconds;
@@ -144,16 +146,27 @@ public sealed class MediaService
         catch { return null; }
     }
 
-    public async void PlayPause() { if (_session != null) await _session.TryTogglePlayPauseAsync(); }
-    public async void Next() { if (_session != null) await _session.TrySkipNextAsync(); }
-    public async void Previous() { if (_session != null) await _session.TrySkipPreviousAsync(); }
+    public void PlayPause() => Send(s => s.TryTogglePlayPauseAsync().AsTask());
+    public void Next() => Send(s => s.TrySkipNextAsync().AsTask());
+    public void Previous() => Send(s => s.TrySkipPreviousAsync().AsTask());
 
-    public async void Seek(double seconds)
+    public void Seek(double seconds)
     {
         if (_session == null) return;
         _position = seconds;
         _positionAt = DateTime.UtcNow;
-        await _session.TryChangePlaybackPositionAsync((long)(seconds * TimeSpan.TicksPerSecond));
+        Send(s => s.TryChangePlaybackPositionAsync((long)(seconds * TimeSpan.TicksPerSecond)).AsTask());
+    }
+
+    /// <summary>
+    /// A command to the player. The app can close mid-command; that must not take the
+    /// notch down with it (an exception in an async void would end the process).
+    /// </summary>
+    private async void Send(Func<GlobalSystemMediaTransportControlsSession, Task<bool>> command)
+    {
+        if (_session is not { } session) return;
+        try { await command(session); }
+        catch { }
     }
 
     /// <summary>Show this app's music (until another app starts playing).</summary>
@@ -172,7 +185,7 @@ public sealed class MediaService
         if (id.Contains("msedge")) return "Edge";
         if (id.Contains("firefox") || id.Contains("308046b0af4a39cb")) return "Firefox";
         if (id.Contains("opera")) return "Opera";
-        if (id.Contains("zunemusic") || id.Contains("media")) return "Media Player";
+        if (id.Contains("zunemusic") || id.Contains("wmplayer")) return "Media Player";
         var name = sourceId.Split('!')[0].Split('\\').Last();
         return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
     }

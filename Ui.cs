@@ -137,12 +137,61 @@ public static class Ui
         return row;
     }
 
-    /// <summary>The optional extras (only text copy on Windows for now).</summary>
-    public static FrameworkElement AddOns() => Switch(L("addonOCR"), Settings.Current.OcrEnabled, on =>
+    /// <summary>The optional extras, all off until turned on.</summary>
+    public static FrameworkElement AddOns()
     {
-        Settings.Current.OcrEnabled = on;
-        Settings.Current.Save();
-    });
+        var stack = new StackPanel();
+        stack.Children.Add(Switch(L("addonOCR"), Settings.Current.OcrEnabled, on =>
+        {
+            Settings.Current.OcrEnabled = on;
+            Settings.Current.Save();
+        }));
+        stack.Children.Add(Switch(L("addonLyrics"), Settings.Current.LyricsEnabled, on =>
+        {
+            Settings.Current.LyricsEnabled = on;
+            Settings.Current.Save();
+        }));
+        var hint = Text(L("lyricsHint"), 11, alpha: 0x80);
+        hint.Margin = new Thickness(0, 0, 52, 4);
+        stack.Children.Add(hint);
+        return stack;
+    }
+
+    /// <summary>Size as one segmented row (Auto, 100%…150%) and the compact pill.</summary>
+    public static FrameworkElement Appearance()
+    {
+        var stack = new StackPanel();
+        var caption = Text(L("size"), 13);
+        caption.Margin = new Thickness(0, 4, 0, 6);
+        stack.Children.Add(caption);
+        var row = new UniformGrid { Rows = 1 };
+        foreach (var size in new[] { 0, 1.0, 1.15, 1.3, 1.5 })
+        {
+            var option = new RadioButton
+            {
+                Content = size == 0 ? L("sizeAuto") : $"{size * 100:0}%",
+                GroupName = "size",
+                IsChecked = Settings.Current.Size == size,
+                Style = (Style)Application.Current.Resources["Segment"],
+            };
+            option.Checked += (_, _) =>
+            {
+                if (Settings.Current.Size == size) return;
+                Settings.Current.Size = size;
+                Settings.Current.Save();
+            };
+            row.Children.Add(option);
+        }
+        stack.Children.Add(row);
+        var compact = Switch(L("compactPill"), Settings.Current.CompactPill, on =>
+        {
+            Settings.Current.CompactPill = on;
+            Settings.Current.Save();
+        });
+        compact.Margin = new Thickness(0, 10, 0, 4);
+        stack.Children.Add(compact);
+        return stack;
+    }
 
     public static FrameworkElement Tip(string glyph, string text)
     {

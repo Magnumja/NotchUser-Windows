@@ -17,11 +17,18 @@
 - **Passe o mouse para abrir**: capa grande, artista, barra de progresso (clique para pular), voltar/play/avançar e os apps que estão tocando, para trocar entre eles.
 - **Funciona com tudo que aparece nos controles de mídia do Windows**: Spotify, Chrome, Edge, Firefox, Media Player…
 - **Prateleira**: arraste arquivos, links ou texto até a pílula para guardar; depois arraste para onde quiser. Clique para selecionar vários; dois cliques abrem; botão direito tem Abrir, Mostrar no Explorador, Copiar e Tirar.
+- **Volume no notch**: quando o volume muda (teclado, barra de tarefas ou outro app), uma barrinha aparece na pílula. No painel há um controle de volume (clique no alto-falante para silenciar), e **girar a roda do mouse sobre a pílula** sobe e desce o volume.
+- **Avisos no notch**: carregador conectado ou desconectado, bateria fraca (20% e 10%) e troca da saída de som (ex.: fone Bluetooth conectou).
+- **Some em tela cheia**: jogos, vídeos e apresentações em tela cheia ficam sem a pílula por cima; ela volta quando você sai.
 - **"Pulinho"** quando a música troca, e o painel abre rapidinho para avisar.
 - **Complemento: copiar texto da tela.** Aperte **Ctrl+Shift+2**, arraste sobre qualquer pedaço da tela (vídeo, imagem, PDF travado, slide numa chamada) e o texto vai direto para a área de transferência. Usa o reconhecimento de texto do próprio Windows, sem internet; a imagem não é salva.
   > Vem desligado: ligue na apresentação ou nos **Ajustes**.
+- **Complemento: letras sincronizadas.** A linha que está sendo cantada aparece na pílula fechada e no painel, na cor do álbum. As letras vêm do [LRCLIB](https://lrclib.net) (gratuito e aberto).
+  > Vem desligado, porque é o único recurso que usa a internet: com ele ligado, o nome da música, o artista, o álbum e a duração são enviados ao LRCLIB.
+- **Tamanho e pílula compacta** (Ajustes → Aparência): Auto, 100%, 115%, 130% ou 150%, e uma pílula só com capa e barrinhas.
 - **Apresentação** na primeira vez que abre: o que o app faz, idioma e complementos.
-- **Ajustes** (botão direito na pílula → **Ajustes…**): idioma (Sistema, Português, English, Español), complementos, mostrar ao trocar de música e abrir ao iniciar o Windows.
+- **Ajustes** (botão direito na pílula → **Ajustes…**): idioma (Sistema, Português, English, Español), aparência, complementos, mostrar ao trocar de música, volume no notch, avisos e abrir ao iniciar o Windows.
+- **Ajustes e prateleira seguros**: os arquivos são gravados de forma atômica; se um deles estragar, ele é guardado como `.bak` e o app abre com o padrão.
 - **Animações como no Mac**: o painel abre com a mesma mola do Mac (cresce com um leve passo além e assenta), o conteúdo entra crescendo do topo, botões afundam ao clicar, itens novos pulam na prateleira e o título desliza ao trocar de música. Tudo a 60 fps.
 - **Leve**: a cor do álbum, os players e a prateleira só são refeitos quando algo muda, e a capa é guardada pequena na memória.
 
@@ -56,6 +63,9 @@ O executável fica em `dist\NotchUser.exe`. Na primeira vez o Windows pode mostr
 - `Settings.cs`, `Strings.cs`: ajustes e textos em português, inglês e espanhol.
 - `OnboardingWindow.cs`, `SettingsWindow.cs`, `Ui.cs`: a apresentação, os Ajustes e as peças visuais deles (estilos em `App.xaml`).
 - `ScreenText.cs`: copiar texto da tela (captura, seleção e reconhecimento).
+- `Volume.cs`: volume e saída de som pelo Core Audio do Windows.
+- `Lyrics.cs`: letras sincronizadas (LRCLIB) e leitura do formato LRC.
+- `FullScreen.cs`, `Power.cs`: detectar tela cheia e ler a bateria.
 
 ## Licença
 

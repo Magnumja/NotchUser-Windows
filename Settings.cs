@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using System.Windows;
 using Microsoft.Win32;
 
 namespace NotchUser;
@@ -13,6 +14,19 @@ public sealed class Settings
     public bool Onboarded { get; set; }
     /// <summary>Add-on: copy text from the screen with Ctrl+Shift+2 (off until turned on).</summary>
     public bool OcrEnabled { get; set; }
+    /// <summary>Add-on: synced lyrics from LRCLIB (off until turned on: it sends the song's name there).</summary>
+    public bool LyricsEnabled { get; set; }
+    /// <summary>Show the volume in the notch when it changes.</summary>
+    public bool VolumeHud { get; set; } = true;
+    /// <summary>Battery and audio device notices in the notch.</summary>
+    public bool Notices { get; set; } = true;
+    /// <summary>Notch size: 0 = automatic, else a scale like 1.15.</summary>
+    public double Size { get; set; }
+    /// <summary>Closed pill shows only the cover and the bars, no title.</summary>
+    public bool CompactPill { get; set; }
+
+    /// <summary>The scale actually used: the chosen one, or one that suits the screen.</summary>
+    public double Scale => Size > 0 ? Size : SystemParameters.PrimaryScreenWidth >= 2400 ? 1.15 : 1.0;
 
     public static Settings Current { get; } = Load();
 
@@ -24,17 +38,43 @@ public sealed class Settings
 
     private static string FilePath => System.IO.Path.Combine(Folder, "settings.json");
 
-    private static Settings Load()
-    {
-        try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings(); }
-        catch { return new Settings(); }
-    }
+    private static Settings Load() => ReadJson<Settings>(FilePath) ?? new Settings();
 
     public void Save()
     {
-        Directory.CreateDirectory(Folder);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        WriteJson(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Reads a saved file. A damaged one is kept aside as .bak (instead of being overwritten
+    /// on the next save) and the app starts from the defaults.
+    /// </summary>
+    public static T? ReadJson<T>(string path) where T : class
+    {
+        if (!File.Exists(path)) return null;
+        try { return JsonSerializer.Deserialize<T>(File.ReadAllText(path)); }
+        catch
+        {
+            try { File.Copy(path, path + ".bak", true); } catch { }
+            return null;
+        }
+    }
+
+    /// <summary>Writes to a temporary file first, so a crash or power cut never leaves half a file.</summary>
+    public static void WriteJson(string path, string json)
+    {
+        try
+        {
+            Directory.CreateDirectory(Folder);
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, json);
+            File.Move(temp, path, true);
+        }
+        catch
+        {
+            // Disk full or locked by an antivirus: keep running with what's in memory.
+        }
     }
 
     // "Start with Windows" lives in the registry, not in the settings file.

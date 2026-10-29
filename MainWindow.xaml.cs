@@ -12,6 +12,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using static NotchUser.Strings;
 
 namespace NotchUser;
@@ -23,6 +24,7 @@ namespace NotchUser;
 public partial class MainWindow : Window
 {
     private readonly MediaService _media = new();
+    private readonly Volume _volume = new();
     private readonly Shelf _shelf = Shelf.Load();
     private readonly HashSet<ShelfEntry> _selected = new();
 
@@ -32,6 +34,10 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _barsTick = new() { Interval = TimeSpan.FromMilliseconds(240) };
     private readonly DispatcherTimer _peekTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _toastTimer = new() { Interval = TimeSpan.FromSeconds(2.8) };
+    private readonly DispatcherTimer _hudTimer = new() { Interval = TimeSpan.FromSeconds(1.6) };
+    private readonly DispatcherTimer _lyricsTick = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private readonly DispatcherTimer _fullScreenCheck = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _batteryCheck = new() { Interval = TimeSpan.FromMinutes(1) };
 
     private bool _expanded;
     private bool _dragging;      // something is being dragged over the notch
@@ -42,6 +48,16 @@ public partial class MainWindow : Window
     private readonly List<Rectangle> _bars = new();
     private readonly Random _random = new();
     private bool _toast;
+    private bool _hud;
+    private bool _seeking;          // dragging along the progress bar
+    private bool _settingVolume;    // dragging along the volume bar
+    private bool _hiddenForFullScreen;
+    // Synced lyrics of the current song (empty when off, not found or still loading).
+    private IReadOnlyList<LyricLine> _lyrics = Array.Empty<LyricLine>();
+    private string _lyricsKey = "";
+    private int _lyricIndex = -1;
+    private string _lyricLine = "";
+    private Power.State? _power;
     private readonly HashSet<ShelfEntry> _shownEntries = new();
     // What's on screen now, so Refresh only redoes what changed.
     private BitmapSource? _shownCover;
@@ -84,6 +100,10 @@ public partial class MainWindow : Window
             if (!Notch.IsMouseOver && !_dragging && !_menuOpen) SetExpanded(false);
         };
         _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); _toast = false; Refresh(); };
+        _hudTimer.Tick += (_, _) => { _hudTimer.Stop(); _hud = false; Refresh(); };
+        _lyricsTick.Tick += (_, _) => UpdateLyric(animate: true);
+        _fullScreenCheck.Tick += (_, _) => CheckFullScreen();
+        _batteryCheck.Tick += (_, _) => CheckPower();
         _progressTick.Tick += (_, _) => UpdateProgress();
         _barsTick.Tick += (_, _) => AnimateBars();
 
@@ -102,13 +122,61 @@ public partial class MainWindow : Window
             _selected.Clear();
             Refresh();
         };
+        // The progress bar follows the mouse while dragging and seeks once, on release.
         Track.MouseLeftButtonDown += (_, e) =>
         {
             if (_media.Duration <= 0) return;
-            _media.Seek(e.GetPosition(Track).X / Track.ActualWidth * _media.Duration);
-            UpdateProgress();
+            _seeking = Track.CaptureMouse();
+            PreviewSeek(e.GetPosition(Track).X);
         };
+        Track.MouseMove += (_, e) => { if (_seeking) PreviewSeek(e.GetPosition(Track).X); };
+        Track.MouseLeftButtonUp += (_, e) =>
+        {
+            if (!_seeking) return;
+            _seeking = false;
+            Track.ReleaseMouseCapture();
+            _media.Seek(Fraction(Track, e.GetPosition(Track).X) * _media.Duration);
+            UpdateProgress();
+            UpdateLyric(animate: false);
+        };
+        Track.LostMouseCapture += (_, _) => _seeking = false;
         BigCover.MouseLeftButtonUp += (_, _) => _media.PlayPause();
+
+        // Volume: click the speaker to mute, drag the bar, or scroll anywhere on the notch.
+        AddPressEffect(VolumeButton);
+        VolumeButton.Click += (_, _) => _volume.ToggleMute();
+        VolumeTrack.MouseLeftButtonDown += (_, e) =>
+        {
+            _settingVolume = VolumeTrack.CaptureMouse();
+            _volume.Set((float)Fraction(VolumeTrack, e.GetPosition(VolumeTrack).X));
+            UpdateVolume();
+        };
+        VolumeTrack.MouseMove += (_, e) =>
+        {
+            if (!_settingVolume) return;
+            _volume.Set((float)Fraction(VolumeTrack, e.GetPosition(VolumeTrack).X));
+            UpdateVolume();
+        };
+        VolumeTrack.MouseLeftButtonUp += (_, _) => { _settingVolume = false; VolumeTrack.ReleaseMouseCapture(); };
+        VolumeTrack.LostMouseCapture += (_, _) => _settingVolume = false;
+        Notch.MouseWheel += (_, e) =>
+        {
+            if (!_volume.Available) return;
+            _volume.Set(_volume.Level + e.Delta / 120f * 0.02f);
+            UpdateVolume();
+            if (!_expanded) ShowHud();
+            e.Handled = true;
+        };
+        _volume.Changed += fromUs =>
+        {
+            UpdateVolume();
+            // The keyboard, the taskbar or another app changed it: show it in the notch.
+            if (!fromUs && !_expanded && Settings.Current.VolumeHud) ShowHud();
+        };
+        _volume.DeviceChanged += name =>
+        {
+            if (Settings.Current.Notices && name.Length > 0) ShowToast("\uE7F6", L("audioOutput"), name, Colors.White);
+        };
 
         Notch.ContextMenu = new ContextMenu();
         Notch.ContextMenuOpening += (_, _) => BuildMenu();
@@ -120,16 +188,31 @@ public partial class MainWindow : Window
         Settings.Changed += () =>
         {
             ApplyLanguage();
+            ApplyScale();
             UpdateHotKey();
+            UpdateLyricsSource();
             Refresh();
+        };
+
+        // Screens plugged in or out, resolution or scaling changed: back to the middle.
+        SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(PlaceWindow);
+        DpiChanged += (_, _) => Dispatcher.BeginInvoke(PlaceWindow);
+        SystemEvents.PowerModeChanged += (_, e) =>
+        {
+            if (e.Mode == PowerModes.StatusChange) Dispatcher.BeginInvoke(CheckPower);
         };
 
         Loaded += async (_, _) =>
         {
-            CenterWindow();
-            Top = 0;
+            ApplyScale();
+            PlaceWindow();
             ApplyLanguage();
             Refresh();
+            _volume.Start();
+            UpdateVolume();
+            CheckPower();
+            if (_power?.HasBattery == true) _batteryCheck.Start();
+            _fullScreenCheck.Start();
             await _media.StartAsync();
         };
     }
@@ -207,11 +290,83 @@ public partial class MainWindow : Window
         ToastDetail.Text = detail;
         ToastDetail.Visibility = detail.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         _toast = true;
+        _hud = false;
         _toastTimer.Stop();
         _toastTimer.Start();
         Refresh();
         GrowIn(ToastSection, 0.05);
         Bump();
+    }
+
+    // MARK: - Volume
+
+    private void ShowHud()
+    {
+        if (_toast || _hiddenForFullScreen) return;
+        var was = _hud;
+        _hud = true;
+        _hudTimer.Stop();
+        _hudTimer.Start();
+        UpdateVolume();
+        if (was) return;
+        Refresh();
+        GrowIn(HudSection, 0.03);
+    }
+
+    private void UpdateVolume()
+    {
+        var level = _volume.Muted ? 0 : _volume.Level;
+        VolumeRow.Visibility = _volume.Available ? Visibility.Visible : Visibility.Collapsed;
+        VolumeFill.Width = VolumeTrack.Width * level;
+        HudFillScale.ScaleX = level;
+        HudText.Text = _volume.Muted ? "" : $"{Math.Round(level * 100)}";
+        var glyph = _volume.Muted || level <= 0 ? "\uE74F" : level < 0.34 ? "\uE993" : level < 0.67 ? "\uE994" : "\uE995";
+        VolumeButton.Content = glyph;
+        HudIcon.Text = glyph;
+    }
+
+    /// <summary>Where along <paramref name="bar"/> the mouse is, from 0 to 1.</summary>
+    private static double Fraction(FrameworkElement bar, double x) => Math.Clamp(x / Math.Max(bar.ActualWidth, 1), 0, 1);
+
+    // MARK: - Battery
+
+    private void CheckPower()
+    {
+        var now = Power.Read();
+        var before = _power;
+        _power = now;
+        if (before == null || now == null || !now.Value.HasBattery || !Settings.Current.Notices) return;
+        var (was, state) = (before.Value, now.Value);
+        if (state.Charging && !was.Charging)
+            ShowToast("\uEA93", L("charging"), $"{state.Percent}%", Color.FromRgb(0x4A, 0xDE, 0x80));
+        else if (!state.Charging && was.Charging)
+            ShowToast("\uE83F", L("onBattery"), $"{state.Percent}%", Colors.White);
+        else if (!state.Charging && state.Percent <= 20 && was.Percent > 20 || !state.Charging && state.Percent <= 10 && was.Percent > 10)
+            ShowToast("\uE850", L("batteryLow"), $"{state.Percent}%", Color.FromRgb(0xF8, 0x71, 0x71));
+    }
+
+    // MARK: - Full screen
+
+    /// <summary>Step aside while a game, a video or a presentation fills the screen.</summary>
+    private void CheckFullScreen()
+    {
+        var hide = FullScreen.IsActive(new WindowInteropHelper(this).Handle) && !_dragging;
+        if (hide == _hiddenForFullScreen) return;
+        _hiddenForFullScreen = hide;
+        if (hide)
+        {
+            SetExpanded(false);
+            _hud = false;
+            Notch.Visibility = Visibility.Hidden;
+            StopBars();
+            _lyricsTick.Stop();
+        }
+        else
+        {
+            Notch.Visibility = Visibility.Visible;
+            Refresh();
+            FadeIn(Notch, 0.25);
+        }
     }
 
     [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
@@ -227,7 +382,7 @@ public partial class MainWindow : Window
     {
         if (_expanded == expanded) return;
         _expanded = expanded;
-        if (expanded) _progressTick.Start(); else _progressTick.Stop();
+        if (expanded) { _progressTick.Start(); _hud = false; _shelf.Prune(); } else _progressTick.Stop();
         Refresh();
         if (expanded) GrowIn(Expanded, 0.05); else FadeIn(Collapsed, 0.2);
     }
@@ -275,17 +430,23 @@ public partial class MainWindow : Window
         var showShelf = hasShelf || _dragging;
         var showMedia = hasMedia && !_dragging;
 
+        var hud = _hud && !_toast && !_expanded;
         var open = _expanded && !_toast;
-        Collapsed.Visibility = !_expanded && !_toast ? Visibility.Visible : Visibility.Collapsed;
+        var compact = Settings.Current.CompactPill;
+        var lyric = LyricShown();
+        Collapsed.Visibility = !_expanded && !_toast && !hud ? Visibility.Visible : Visibility.Collapsed;
         Expanded.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
         ToastSection.Visibility = _toast ? Visibility.Visible : Visibility.Collapsed;
+        HudSection.Visibility = hud ? Visibility.Visible : Visibility.Collapsed;
 
         // Pill
-        PillCover.Visibility = PillTitle.Visibility = hasMedia ? Visibility.Visible : Visibility.Collapsed;
+        PillCover.Visibility = hasMedia ? Visibility.Visible : Visibility.Collapsed;
+        PillTitle.Visibility = hasMedia && !compact ? Visibility.Visible : Visibility.Collapsed;
         PillBars.Visibility = hasMedia && _media.Playing ? Visibility.Visible : Visibility.Collapsed;
         PillShelf.Visibility = !hasMedia && hasShelf ? Visibility.Visible : Visibility.Collapsed;
         PillShelfCount.Text = _shelf.Items.Count.ToString();
-        PillTitle.Text = _media.Title;
+        // With lyrics on, the closed pill sings along instead of showing the title.
+        PillTitle.Text = lyric ? _lyricLine : _media.Title;
 
         // Panel
         MediaSection.Visibility = showMedia ? Visibility.Visible : Visibility.Collapsed;
@@ -298,23 +459,31 @@ public partial class MainWindow : Window
         TitleText.Text = _media.Title;
         ArtistText.Text = _media.Artist;
         ArtistText.Visibility = _media.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        LyricText.Text = _lyricLine;
+        LyricText.Visibility = lyric ? Visibility.Visible : Visibility.Collapsed;
         PlayButton.Content = _media.Playing ? "" : "";
         SetCover(_media.Cover);
+        LyricText.Foreground = new SolidColorBrush(_accent);
         var sourcesKey = string.Join("|", _media.Sessions.Select(x => x.SourceAppUserModelId)) + "|" + _media.SourceId;
         if (sourcesKey != _sourcesKey) RebuildSources();
         if (ShelfKey() != _shelfKey) RebuildShelf();
         UpdateProgress();
 
-        if (_media.Playing && hasMedia) _barsTick.Start(); else StopBars();
+        if (_media.Playing && hasMedia && !_hiddenForFullScreen) _barsTick.Start(); else StopBars();
+        UpdateLyricsSource();
+        if (_lyrics.Count > 0 && _media.Playing && !_hiddenForFullScreen) _lyricsTick.Start(); else _lyricsTick.Stop();
 
         double width, height;
         if (_toast) (width, height) = (320, 58);
+        else if (hud) (width, height) = (260, 34);
         else if (_expanded)
         {
             width = 460;
             height = 26 + (showMedia ? 150 : 0) + (showShelf ? 84 : 0) + (showMedia && showShelf ? 21 : 0)
                      + (!showMedia && !showShelf ? 58 : 0);
         }
+        else if (hasMedia && compact) (width, height) = (130, 32);
+        else if (hasMedia && lyric) (width, height) = (380, 32);
         else if (hasMedia) (width, height) = (300, 32);
         else if (hasShelf) (width, height) = (170, 28);
         else (width, height) = (150, 20);
@@ -323,18 +492,39 @@ public partial class MainWindow : Window
 
     private void AnimateSize(double width, double height)
     {
-        Notch.CornerRadius = _expanded || _toast ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
+        Notch.CornerRadius = (_expanded || _toast) && !_hud ? new CornerRadius(0, 0, 26, 26) : new CornerRadius(0, 0, 14, 14);
         // Same spring as the Mac notch opening: quick, with a hint of overshoot.
         Notch.BeginAnimation(WidthProperty, SpringEase.To(width, 0.42, 0.76));
         Notch.BeginAnimation(HeightProperty, SpringEase.To(height, 0.4, 0.8));
     }
 
-    private void CenterWindow() => Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
+    /// <summary>Top middle of the main screen.</summary>
+    private void PlaceWindow()
+    {
+        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
+        Top = 0;
+    }
+
+    /// <summary>The Size setting: the whole notch, drawn bigger.</summary>
+    private void ApplyScale()
+    {
+        var scale = Settings.Current.Scale;
+        if (Notch.LayoutTransform is ScaleTransform current && current.ScaleX == scale) return;
+        Notch.LayoutTransform = new ScaleTransform(scale, scale);
+    }
+
+    private void PreviewSeek(double x)
+    {
+        var position = Fraction(Track, x) * _media.Duration;
+        TrackFill.Width = Track.ActualWidth * position / _media.Duration;
+        ElapsedText.Text = Clock(position);
+        RemainingText.Text = "-" + Clock(_media.Duration - position);
+    }
 
     private void UpdateProgress()
     {
         var duration = _media.Duration;
-        if (duration <= 0 || !_expanded) return;
+        if (duration <= 0 || !_expanded || _seeking) return;
         var position = _media.LivePosition;
         TrackFill.Width = Math.Max(0, Track.ActualWidth * position / duration);
         ElapsedText.Text = Clock(position);
@@ -345,6 +535,51 @@ public partial class MainWindow : Window
     {
         var t = (int)Math.Max(0, seconds);
         return $"{t / 60}:{t % 60:00}";
+    }
+
+    // MARK: - Lyrics
+
+    private bool LyricShown() =>
+        Settings.Current.LyricsEnabled && _media.HasMedia && _lyrics.Count > 0 && _lyricIndex >= 0 && _lyricLine.Length > 0;
+
+    /// <summary>Fetch the lyrics when the song changes (or the add-on is turned on).</summary>
+    private async void UpdateLyricsSource()
+    {
+        var key = Settings.Current.LyricsEnabled && _media.HasMedia ? $"{_media.Title}\n{_media.Artist}" : "";
+        if (key == _lyricsKey) return;
+        _lyricsKey = key;
+        _lyrics = Array.Empty<LyricLine>();
+        _lyricIndex = -1;
+        _lyricLine = "";
+        if (key.Length == 0) return;
+        var lines = await Lyrics.FindAsync(_media.Title, _media.Artist, _media.Album, _media.Duration);
+        if (key != _lyricsKey) return;  // the song changed meanwhile
+        _lyrics = lines;
+        UpdateLyric(animate: false);
+        Refresh();
+    }
+
+    private void UpdateLyric(bool animate)
+    {
+        // A little ahead, so the line shows up as it's sung and not just after.
+        var index = Lyrics.IndexAt(_lyrics, _media.LivePosition + 0.25);
+        if (index == _lyricIndex) return;
+        var wasShown = LyricShown();
+        _lyricIndex = index;
+        _lyricLine = index >= 0 ? (_lyrics[index].Text.Length > 0 ? _lyrics[index].Text : "♪") : "";
+        if (LyricShown() != wasShown) { Refresh(); return; }
+        LyricText.Text = _lyricLine;
+        if (!LyricShown()) return;
+        PillTitle.Text = _lyricLine;
+        if (!animate) return;
+        foreach (var text in new FrameworkElement[] { LyricText, PillTitle })
+        {
+            if (text.RenderTransform is not TranslateTransform move) text.RenderTransform = move = new TranslateTransform();
+            var slide = new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(260)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+            Timeline.SetDesiredFrameRate(slide, 60);
+            move.BeginAnimation(TranslateTransform.YProperty, slide);
+            FadeIn(text, 0.26);
+        }
     }
 
     // MARK: - Cover and album color

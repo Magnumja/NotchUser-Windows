@@ -18,7 +18,11 @@ public sealed class SettingsWindow : GlassWindow
         _open.Activate();
     }
 
-    private SettingsWindow() : base(440, 520) => Build();
+    private SettingsWindow() : base(440, 640)
+    {
+        MaxHeight = SystemParameters.WorkArea.Height;
+        Build();
+    }
 
     private void Build()
     {
@@ -31,12 +35,23 @@ public sealed class SettingsWindow : GlassWindow
 
         // Changing the language rebuilds the window in the new language.
         stack.Children.Add(Ui.Section(L("language"), Ui.LanguagePicker(Build)));
+        stack.Children.Add(Ui.Section(L("appearance"), Ui.Appearance()));
         stack.Children.Add(Ui.Section(L("addons"), Ui.AddOns()));
 
         var behavior = new StackPanel();
         behavior.Children.Add(Ui.Switch(L("peekOnTrack"), Settings.Current.PeekOnTrackChange, on =>
         {
             Settings.Current.PeekOnTrackChange = on;
+            Settings.Current.Save();
+        }));
+        behavior.Children.Add(Ui.Switch(L("volumeHud"), Settings.Current.VolumeHud, on =>
+        {
+            Settings.Current.VolumeHud = on;
+            Settings.Current.Save();
+        }));
+        behavior.Children.Add(Ui.Switch(L("notices"), Settings.Current.Notices, on =>
+        {
+            Settings.Current.Notices = on;
             Settings.Current.Save();
         }));
         behavior.Children.Add(Ui.Switch(L("launchAtLogin"), Settings.LaunchAtLogin, on => Settings.LaunchAtLogin = on));
@@ -46,6 +61,7 @@ public sealed class SettingsWindow : GlassWindow
         done.Margin = new Thickness(0, 10, 0, 0);
         done.HorizontalAlignment = HorizontalAlignment.Stretch;
         stack.Children.Add(done);
-        Card.Child = stack;
+        // Taller than small laptop screens allow: scroll when it doesn't fit.
+        Card.Child = new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     }
 }
