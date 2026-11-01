@@ -114,7 +114,7 @@ public static class Motion
     public static void AnimateMenus() =>
         EventManager.RegisterClassHandler(typeof(ContextMenu), ContextMenu.OpenedEvent, new RoutedEventHandler((sender, _) =>
         {
-            if (sender is not ContextMenu m || m.Template?.FindName("Surface", m) is not Border surface) return;
+            if (sender is not ContextMenu m || m.Template?.FindName("Surface", m) is not FrameworkElement surface) return;
             var (scale, _) = Transforms(surface, new Point(0, 0));
             surface.BeginAnimation(UIElement.OpacityProperty, Ease(1, 0.12, from: 0, ease: new QuadraticEase { EasingMode = EasingMode.EaseOut }));
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.25, 0.85, from: 0.96));

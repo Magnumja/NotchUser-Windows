@@ -39,7 +39,6 @@ public class GlassWindow : Window
             Background = Frozen(new LinearGradientBrush(Color.FromArgb(0xF7, 0x2A, 0x2A, 0x2D), Color.FromArgb(0xF7, 0x1E, 0x1E, 0x21), 90)),
             BorderBrush = White(0.12),
             BorderThickness = new Thickness(1),
-            Effect = new DropShadowEffect { BlurRadius = 30, ShadowDepth = 8, Direction = 270, Opacity = 0.5 },
             ClipToBounds = true,
         };
         _content.Children.Add(Card);
@@ -54,7 +53,22 @@ public class GlassWindow : Window
         close.Click += (_, _) => Close();
         _content.Children.Add(close);
         frame.Child = _content;
-        Content = frame;
+        // The shadow sits behind the window as rings of translucent black: a blurred shadow on the
+        // window itself was redrawn (by the processor) on every hover and animation inside it.
+        var root = new Grid();
+        for (var i = 0; i < 8; i++)
+        {
+            double spread = 8 - i, drop = 6;
+            root.Children.Add(new Border
+            {
+                Margin = new Thickness(20 - spread, 20 - spread + drop, 20 - spread, 20 - spread - drop),
+                CornerRadius = new CornerRadius(12 + spread),
+                Background = Black(0.035 + i * 0.006),
+                IsHitTestVisible = false,
+            });
+        }
+        root.Children.Add(frame);
+        Content = root;
 
         // Drag the window by its background.
         MouseLeftButtonDown += (_, e) => { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); };

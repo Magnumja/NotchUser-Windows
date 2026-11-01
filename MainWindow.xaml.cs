@@ -64,6 +64,7 @@ public partial class MainWindow : Window
     private bool _dropTargeted;      // ...and it is over the notch
     private bool _draggingOut;       // ...or out of our own shelf (ignored as a drop)
     private bool _menuOpen;
+    private ContextMenu? _openMenu;
     private bool _hud;
     private bool _seeking, _settingVolume;
     private bool _hiddenForFullScreen;
@@ -104,21 +105,8 @@ public partial class MainWindow : Window
         _lyric.Foreground = _accentBrush;
 
         NotchHost.SizeChanged += (_, _) => UpdateShape();
-        NotchHost.MouseEnter += (_, _) =>
-        {
-            _inside = true;
-            _leaveDelay.Stop();
-            _peeking = false;
-            if (!_expanded) _hoverDelay.Start();
-            UpdateLift();
-        };
-        NotchHost.MouseLeave += (_, _) =>
-        {
-            _inside = false;
-            _hoverDelay.Stop();
-            _leaveDelay.Start();
-            UpdateLift();
-        };
+        NotchHost.MouseEnter += (_, _) => OnEnter();
+        NotchHost.MouseLeave += (_, _) => OnLeave();
         // Small delays so passing the cursor along the top doesn't pop it open, and a brief exit doesn't snap it shut.
         _hoverDelay.Tick += (_, _) => { _hoverDelay.Stop(); if (_inside) { _hoverOpen = true; UpdateExpanded(); } };
         _leaveDelay.Tick += (_, _) =>
@@ -144,7 +132,13 @@ public partial class MainWindow : Window
         _lyricsTick.Tick += (_, _) => UpdateLyric(animate: true);
         _fullScreenCheck.Tick += (_, _) => CheckFullScreen();
         _batteryCheck.Tick += (_, _) => CheckPower();
-        _dragPoll.Tick += (_, _) => { PollDrag(); CheckHover(); CheckKeyLocks(); };
+        _dragPoll.Tick += (_, _) =>
+        {
+            PollDrag();
+            CheckHover();
+            CheckKeyLocks();
+            PollMenu();
+        };
         _compactDelay.Tick += (_, _) => { _compactDelay.Stop(); if (!NeedsFullWindow()) SetCompact(true); };
         _privacyCheck.Tick += (_, _) => UpdatePrivacy();
         _brightness.Changed += level =>
@@ -176,10 +170,12 @@ public partial class MainWindow : Window
             e.Handled = true;
         };
 
-        NotchHost.ContextMenu = new ContextMenu();
+        // Menus stay open until a click outside, Esc or a choice (see PollMenu): left to WPF, they
+        // closed the moment another app (a game launcher) took the mouse for an instant.
+        NotchHost.ContextMenu = new ContextMenu { StaysOpen = true };
         NotchHost.ContextMenuOpening += (_, _) => BuildMenu();
-        NotchHost.ContextMenu.Opened += (_, _) => _menuOpen = true;
-        NotchHost.ContextMenu.Closed += (_, _) => { _menuOpen = false; _leaveDelay.Start(); };
+        NotchHost.ContextMenu.Opened += (_, _) => { _menuOpen = true; _openMenu = NotchHost.ContextMenu; };
+        NotchHost.ContextMenu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); };
 
         _media.Changed += Refresh;
         _media.TrackChanged += OnTrackChanged;
@@ -1464,9 +1460,9 @@ public partial class MainWindow : Window
             DragOut(entry, root);
         };
 
-        var menu = new ContextMenu();
-        menu.Opened += (_, _) => _menuOpen = true;
-        menu.Closed += (_, _) => { _menuOpen = false; _leaveDelay.Start(); };
+        var menu = new ContextMenu { StaysOpen = true };
+        menu.Opened += (_, _) => { _menuOpen = true; _openMenu = menu; };
+        menu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); };
         root.ContextMenu = menu;
         root.ContextMenuOpening += (_, _) => FillShelfMenu(menu, entry);
         return root;
@@ -1596,7 +1592,7 @@ public partial class MainWindow : Window
             var b = Root.PointToScreen(new Point(right, bottom));
             return cursor.X >= a.X && cursor.X <= b.X && cursor.Y >= a.Y && cursor.Y <= b.Y;
         }
-        var hot = _expanded || down || In(-80, 0, Root.Width + 80, 260);
+        var hot = _expanded || _menuOpen || down || In(-80, 0, Root.Width + 80, 260);
         _dragPoll.Interval = TimeSpan.FromMilliseconds(hot ? 33 : 250);
 
         // Only for a real drag: held a moment and moved. A click or double-click near the top
@@ -1621,15 +1617,51 @@ public partial class MainWindow : Window
     /// </summary>
     private void CheckHover()
     {
-        if (!_inside || _menuOpen || _seeking || _settingVolume || _dragging) return;
+        if (_menuOpen || _seeking || _settingVolume || _dragging) return;
+        var over = CursorOnNotch();
+        // Entering only with no button held: moving a window or selecting text along the top isn't hovering.
+        if (over && !_inside && !Native.LeftButtonDown && !Native.RightButtonDown) OnEnter();
+        else if (!over && _inside) OnLeave();
+    }
+
+    private bool CursorOnNotch()
+    {
         var (x, y) = Native.Cursor;
-        if (x == int.MinValue || PresentationSource.FromVisual(NotchHost) == null) return;
+        if (x == int.MinValue || PresentationSource.FromVisual(NotchHost) == null) return false;
         var p = NotchHost.PointFromScreen(new Point(x, y));
-        if (p.X >= 0 && p.X <= NotchHost.ActualWidth && p.Y >= 0 && p.Y <= NotchHost.ActualHeight) return;
+        return p.X >= 0 && p.X <= NotchHost.ActualWidth && p.Y >= 0 && p.Y <= NotchHost.ActualHeight;
+    }
+
+    private void OnEnter()
+    {
+        if (_inside) return;
+        _inside = true;
+        _leaveDelay.Stop();
+        _peeking = false;
+        if (!_expanded) _hoverDelay.Start();
+        UpdateLift();
+    }
+
+    private void OnLeave()
+    {
+        if (!_inside) return;
         _inside = false;
         _hoverDelay.Stop();
         if (!_leaveDelay.IsEnabled) _leaveDelay.Start();
         UpdateLift();
+    }
+
+    /// <summary>
+    /// Closes an open menu the way a normal one would: a click anywhere that isn't the menu, its
+    /// submenu or the notch, or Esc. The notch never takes the keyboard (the app in use keeps it),
+    /// so Esc is read directly.
+    /// </summary>
+    private void PollMenu()
+    {
+        if (_openMenu == null) return;
+        var (x, y) = Native.Cursor;
+        var clickedAway = (Native.LeftButtonDown || Native.RightButtonDown) && !Native.OurWindowAt(x, y) && !CursorOnNotch();
+        if (clickedAway || Native.KeyDown(0x1B /* VK_ESCAPE */)) _openMenu.IsOpen = false;
     }
 
     private void OnDragOver(object sender, DragEventArgs e)
@@ -1727,7 +1759,14 @@ public partial class MainWindow : Window
         var item = new MenuItem { Header = header, InputGestureText = gesture ?? "" };
         if (glyph != null) item.Icon = Icons.Glyph(glyph, 14, Brushes.White);
         if (isChecked is bool c) { item.IsCheckable = true; item.IsChecked = c; }
-        item.Click += (_, _) => action();
+        item.Click += (_, _) =>
+        {
+            // The menus stay open on their own (StaysOpen), so a choice closes them here.
+            DependencyObject? owner = item;
+            while (owner != null && owner is not System.Windows.Controls.ContextMenu) owner = LogicalTreeHelper.GetParent(owner);
+            if (owner is System.Windows.Controls.ContextMenu menu) menu.IsOpen = false;
+            action();
+        };
         return item;
     }
 

@@ -152,6 +152,27 @@
             </Setter>
         </Style>
 
+        <!-- The menus' shadow: soft rings of translucent black instead of a blur. Everything is drawn by
+             the processor, and a blurred shadow around the menu was redrawn on every highlight change
+             (the menu stuttered as the mouse went over it); these rings cost nothing to redraw. -->
+        <ControlTemplate x:Key="MenuShadow" TargetType="ContentControl">
+            <Grid IsHitTestVisible="False">
+                <Border Background="#0C000000" CornerRadius="15" Margin="0,0,4,2"/>
+                <Border Background="#12000000" CornerRadius="13" Margin="0,1,6,4"/>
+                <Border Background="#16000000" CornerRadius="12" Margin="0,2,7,5"/>
+                <Border Background="#1C000000" CornerRadius="11" Margin="0,3,8,6"/>
+                <Border Background="#22000000" CornerRadius="10" Margin="0,4,9,7"/>
+            </Grid>
+        </ControlTemplate>
+
+        <ControlTemplate x:Key="TipShadow" TargetType="ContentControl">
+            <Grid IsHitTestVisible="False">
+                <Border Background="#10000000" CornerRadius="9" Margin="0,0,3,1"/>
+                <Border Background="#18000000" CornerRadius="8" Margin="0,1,4,2"/>
+                <Border Background="#22000000" CornerRadius="7" Margin="0,2,5,3"/>
+            </Grid>
+        </ControlTemplate>
+
         <!-- Menus: dark and rounded with icons and checks, like the Mac notch's native menu. -->
         <Style TargetType="ContextMenu">
             <Setter Property="SnapsToDevicePixels" Value="True"/>
@@ -161,12 +182,12 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ContextMenu">
-                        <Border x:Name="Surface" Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
-                            <Border.Effect>
-                                <DropShadowEffect ShadowDepth="5" BlurRadius="14" Opacity="0.45" Direction="270"/>
-                            </Border.Effect>
-                            <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
-                        </Border>
+                        <Grid x:Name="Surface">
+                            <ContentControl Template="{StaticResource MenuShadow}" Focusable="False" IsTabStop="False"/>
+                            <Border Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
+                                <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                            </Border>
+                        </Grid>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -209,12 +230,12 @@
                 <Popup x:Name="PART_Popup" Placement="Right" HorizontalOffset="2" VerticalOffset="-6" AllowsTransparency="True"
                        IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}" Focusable="False"
                        PopupAnimation="Fade">
-                    <Border Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
-                        <Border.Effect>
-                            <DropShadowEffect ShadowDepth="5" BlurRadius="14" Opacity="0.45" Direction="270"/>
-                        </Border.Effect>
-                        <StackPanel IsItemsHost="True"/>
-                    </Border>
+                    <Grid>
+                        <ContentControl Template="{StaticResource MenuShadow}" Focusable="False" IsTabStop="False"/>
+                        <Border Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
+                            <StackPanel IsItemsHost="True"/>
+                        </Border>
+                    </Grid>
                 </Popup>
             </Grid>
             <ControlTemplate.Triggers>
@@ -257,18 +278,18 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ToolTip">
-                        <Border Background="#F2323234" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="6" Padding="8,4" Margin="0,0,6,6" MaxWidth="320">
-                            <Border.Effect>
-                                <DropShadowEffect ShadowDepth="2" BlurRadius="6" Opacity="0.4" Direction="270"/>
-                            </Border.Effect>
-                            <ContentPresenter TextBlock.Foreground="White" TextBlock.FontSize="12">
-                                <ContentPresenter.Resources>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="TextWrapping" Value="Wrap"/>
-                                    </Style>
-                                </ContentPresenter.Resources>
-                            </ContentPresenter>
-                        </Border>
+                        <Grid>
+                            <ContentControl Template="{StaticResource TipShadow}" Focusable="False" IsTabStop="False"/>
+                            <Border Background="#F2323234" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="6" Padding="8,4" Margin="0,0,6,6" MaxWidth="320">
+                                <ContentPresenter TextBlock.Foreground="White" TextBlock.FontSize="12">
+                                    <ContentPresenter.Resources>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="TextWrapping" Value="Wrap"/>
+                                        </Style>
+                                    </ContentPresenter.Resources>
+                                </ContentPresenter>
+                            </Border>
+                        </Grid>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
