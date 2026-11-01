@@ -31,9 +31,16 @@ public sealed class Settings
     public bool Notices { get; set; } = true;
     /// <summary>Notch size: 0 = automatic, else a scale like 1.15.</summary>
     public double Size { get; set; }
+    /// <summary>What shows the music is playing: "bars" (the Mac's Basic) or "wave" (the Mac's Glass wave).</summary>
+    public string Indicator { get; set; } = "bars";
+    /// <summary>With nothing playing and an empty shelf, the closed pill shows the time (off: just the pill, as on the Mac).</summary>
+    public bool ClockInPill { get; set; }
+    /// <summary>Apps whose media never shows in the notch (e.g. a browser playing videos), by app id.</summary>
+    public List<string> HiddenApps { get; set; } = new();
 
     public bool Lifted => false;
     public bool Glass => false;
+    public bool Wave => Indicator == "wave";
 
     /// <summary>The scale actually used: the chosen one, or one that suits the screen.</summary>
     public double Scale => Size > 0 ? Size : SystemParameters.PrimaryScreenWidth >= 2400 ? 1.15 : 1.0;

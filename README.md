@@ -33,6 +33,9 @@ O visual e as animações são os mesmos da versão do Mac: mesmo formato de not
 - **Complemento: letras sincronizadas.** A linha que está sendo cantada aparece no notch fechado e no painel, na cor do álbum. As letras vêm do [LRCLIB](https://lrclib.net) (gratuito e aberto).
   > Os complementos vêm desligados. As letras são o único recurso que usa a internet: com elas ligadas, o nome da música, o artista, o álbum e a duração são enviados ao LRCLIB.
 - **Tamanho** (Ajustes → Aparência): Auto, 100%, 115%, 130% ou 150%.
+- **Indicador de música** (Ajustes → Aparência): barrinhas ou a onda colorida do estilo Vidro do Mac. Opcional: **a hora na pílula** quando nada está tocando.
+- **Apps no notch** (Ajustes → Geral): desligue um app para a mídia dele não aparecer no notch (ex.: o navegador tocando vídeos).
+- **Não fecha por erro**: se algo der errado num botão ou menu, o erro vai para `%AppData%\NotchUser\errors.log` e o notch continua rodando.
 - **Apresentação** na primeira vez que abre e **Ajustes** em paisagem, com barra lateral, como no Mac. Menu do botão direito escuro, com ícones e seções.
 - **Ajustes e prateleira seguros**: os arquivos são gravados de forma atômica; se um deles estragar, ele é guardado como `.bak` e o app abre com o padrão.
 

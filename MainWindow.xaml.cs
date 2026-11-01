@@ -53,6 +53,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _bumpBack = new() { Interval = TimeSpan.FromMilliseconds(160) };
     private readonly DispatcherTimer _compactDelay = new() { Interval = TimeSpan.FromMilliseconds(900) };
     private readonly DispatcherTimer _privacyCheck = new() { Interval = TimeSpan.FromSeconds(2) };
+    private readonly DispatcherTimer _clockTick = new() { Interval = TimeSpan.FromSeconds(10) };
 
     // What the notch is doing.
     private bool _expanded;
@@ -141,6 +142,7 @@ public partial class MainWindow : Window
         };
         _compactDelay.Tick += (_, _) => { _compactDelay.Stop(); if (!NeedsFullWindow()) SetCompact(true); };
         _privacyCheck.Tick += (_, _) => UpdatePrivacy();
+        _clockTick.Tick += (_, _) => PillLyric.Text = DateTime.Now.ToString("t", CultureInfo.CurrentCulture);
         _brightness.Changed += level =>
         {
             if (_expanded || !Settings.Current.VolumeHud) return;
@@ -173,9 +175,9 @@ public partial class MainWindow : Window
         // Menus stay open until a click outside, Esc or a choice (see PollMenu): left to WPF, they
         // closed the moment another app (a game launcher) took the mouse for an instant.
         NotchHost.ContextMenu = new ContextMenu { StaysOpen = true };
-        NotchHost.ContextMenuOpening += (_, _) => BuildMenu();
-        NotchHost.ContextMenu.Opened += (_, _) => { _menuOpen = true; _openMenu = NotchHost.ContextMenu; };
-        NotchHost.ContextMenu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); };
+        NotchHost.ContextMenuOpening += (_, _) => { App.Trace("menu opening"); BuildMenu(); };
+        NotchHost.ContextMenu.Opened += (_, _) => { _menuOpen = true; _openMenu = NotchHost.ContextMenu; App.Trace("menu opened"); };
+        NotchHost.ContextMenu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); App.Trace("menu closed"); };
 
         _media.Changed += Refresh;
         _media.TrackChanged += OnTrackChanged;
@@ -348,6 +350,7 @@ public partial class MainWindow : Window
     private readonly TextBlock _pillCount = new() { FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = White(0.8), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _hudIcon = Icons.Glyph("\uE995", 13, White(0.85));
     private readonly ScaleTransform _hudFill = new(0, 1);
+    private readonly FrameworkElement _pillEmptyLeft = new Border(), _pillEmptyRight = new Border();
     private readonly TextBlock _hudText = new() { FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = White(0.85), VerticalAlignment = VerticalAlignment.Center };
 
     private void BuildCollapsed()
@@ -373,7 +376,13 @@ public partial class MainWindow : Window
         else if (hasMedia)
         {
             left = _pillCover;
-            right = Settings.Current.Glass ? _pillWave : _pillBars;
+            right = Settings.Current.Wave ? _pillWave : _pillBars;
+        }
+        else if (_shelf.Items.Count == 0 && Settings.Current.ClockInPill)
+        {
+            // Nothing playing, nothing kept: just the time in the middle (PillLyric holds it).
+            left = _pillEmptyLeft;
+            right = _pillEmptyRight;
         }
         else
         {
@@ -618,12 +627,15 @@ public partial class MainWindow : Window
         var toast = _toast != null;
         var hud = _hud && !_expanded && !toast;
         var lyric = LyricShown() && !_expanded && !hud;
+        var clock = Settings.Current.ClockInPill && !extended && !hud && !_expanded;
 
         // Collapsed
         UpdateCollapsed(hasMedia, hud);
-        PillLyric.Text = _lyricLine;
-        PillLyric.Visibility = lyric ? Visibility.Visible : Visibility.Collapsed;
-        var showCollapsed = !_expanded && (extended || hud);
+        PillLyric.Text = clock ? DateTime.Now.ToString("t", CultureInfo.CurrentCulture) : _lyricLine;
+        PillLyric.Foreground = White(clock ? 0.85 : 0.8);
+        PillLyric.Visibility = lyric || clock ? Visibility.Visible : Visibility.Collapsed;
+        if (clock && !_hiddenForFullScreen && !_locked) _clockTick.Start(); else _clockTick.Stop();
+        var showCollapsed = !_expanded && (extended || hud || clock);
         if (Collapsed.Tag as bool? != showCollapsed)
         {
             Collapsed.Tag = showCollapsed;
@@ -674,7 +686,7 @@ public partial class MainWindow : Window
 
         // Only the indicator that can be seen moves: the pill's while closed, the panel's while open.
         var running = !_hiddenForFullScreen && !_locked;
-        var glassStyle = Settings.Current.Glass;
+        var glassStyle = Settings.Current.Wave;
         var pillOn = _media.Playing && running && !_expanded;
         var bigOn = _media.Playing && running && _expanded;
         _pillBars.Playing = pillOn && !glassStyle;
@@ -735,7 +747,7 @@ public partial class MainWindow : Window
     /// <summary>Opens or closes from everything that wants it open (Mac: NotchController.tick).</summary>
     private void UpdateExpanded()
     {
-        if (_menuOpen) return;  // the mouse is on the menu, not the notch: hold still
+        if (_menuOpen) { App.Trace("UpdateExpanded skipped: menu open"); return; }  // the mouse is on the menu, not the notch: hold still
         var want = _hoverOpen || _dragging || _toast != null || (_peeking && _media.HasMedia);
         if (_hiddenForFullScreen) want = false;
         SetExpanded(want);
@@ -744,6 +756,7 @@ public partial class MainWindow : Window
     private void SetExpanded(bool expanded)
     {
         if (_expanded == expanded) return;
+        App.Trace($"SetExpanded {expanded} (hover={_hoverOpen} drag={_dragging} toast={_toast != null} peek={_peeking})");
         _expanded = expanded;
         if (expanded)
         {
@@ -846,7 +859,7 @@ public partial class MainWindow : Window
         RimEnd.Color = Color.FromArgb((byte)((glass ? 0.45 : 0.28) * 255), 255, 255, 255);
 
         _bigIndicator.Children.Clear();
-        _bigIndicator.Children.Add(glass ? _bigWave : _bigBars);
+        _bigIndicator.Children.Add(Settings.Current.Wave ? _bigWave : _bigBars);
         _pillBars.SetGlow(elevated, _accent);
         _bigBars.SetGlow(elevated, _accent);
 
@@ -1617,12 +1630,22 @@ public partial class MainWindow : Window
     /// </summary>
     private void CheckHover()
     {
-        if (_menuOpen || _seeking || _settingVolume || _dragging) return;
+        if (_menuOpen || _seeking || _settingVolume || _dragging)
+        {
+            if (DateTime.UtcNow - _blockedTraceAt > TimeSpan.FromSeconds(1))
+            {
+                _blockedTraceAt = DateTime.UtcNow;
+                App.Trace($"hover check blocked: menu={_menuOpen} seek={_seeking} vol={_settingVolume} drag={_dragging} openMenu={_openMenu?.IsOpen}");
+            }
+            return;
+        }
         var over = CursorOnNotch();
         // Entering only with no button held: moving a window or selecting text along the top isn't hovering.
         if (over && !_inside && !Native.LeftButtonDown && !Native.RightButtonDown) OnEnter();
         else if (!over && _inside) OnLeave();
     }
+
+    private DateTime _blockedTraceAt;
 
     private bool CursorOnNotch()
     {
@@ -1635,6 +1658,7 @@ public partial class MainWindow : Window
     private void OnEnter()
     {
         if (_inside) return;
+        App.Trace("enter");
         _inside = true;
         _leaveDelay.Stop();
         _peeking = false;
@@ -1645,6 +1669,7 @@ public partial class MainWindow : Window
     private void OnLeave()
     {
         if (!_inside) return;
+        App.Trace("leave");
         _inside = false;
         _hoverDelay.Stop();
         if (!_leaveDelay.IsEnabled) _leaveDelay.Start();
@@ -1661,7 +1686,11 @@ public partial class MainWindow : Window
         if (_openMenu == null) return;
         var (x, y) = Native.Cursor;
         var clickedAway = (Native.LeftButtonDown || Native.RightButtonDown) && !Native.OurWindowAt(x, y) && !CursorOnNotch();
-        if (clickedAway || Native.KeyDown(0x1B /* VK_ESCAPE */)) _openMenu.IsOpen = false;
+        if (clickedAway || Native.KeyDown(0x1B /* VK_ESCAPE */))
+        {
+            App.Trace(clickedAway ? "menu: clicked away" : "menu: Esc");
+            _openMenu.IsOpen = false;
+        }
     }
 
     private void OnDragOver(object sender, DragEventArgs e)

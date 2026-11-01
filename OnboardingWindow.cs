@@ -34,6 +34,9 @@ public sealed class OnboardingWindow : GlassWindow
 
     private void Build()
     {
+        // Built again when the language changes: the parts kept across builds leave the old layout first.
+        (_pageHost.Parent as Panel)?.Children.Remove(_pageHost);
+        (_dots.Parent as Panel)?.Children.Remove(_dots);
         var root = new DockPanel { Margin = new Thickness(28, 36, 28, 22), LastChildFill = true };
         var footer = Footer();
         DockPanel.SetDock(footer, Dock.Bottom);

@@ -20,10 +20,15 @@ public sealed class Brightness
         try
         {
             _watcher = new ManagementEventWatcher(new ManagementScope(@"root\wmi"), new EventQuery("SELECT * FROM WmiMonitorBrightnessEvent"));
+            // Arrives on a WMI thread, where an error would end the app: read it carefully, act on the UI thread.
             _watcher.EventArrived += (_, e) =>
             {
-                if (e.NewEvent["Brightness"] is byte level)
-                    Application.Current?.Dispatcher.BeginInvoke(() => Changed?.Invoke(level));
+                try
+                {
+                    if (e.NewEvent["Brightness"] is byte level)
+                        Application.Current?.Dispatcher.BeginInvoke(() => Changed?.Invoke(level));
+                }
+                catch (Exception ex) { App.Log(ex); }
             };
             _watcher.Start();
         }

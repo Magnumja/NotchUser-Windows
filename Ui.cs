@@ -198,7 +198,8 @@ public static class Ui
             if (Settings.Current.Language == code) return;
             Settings.Current.Language = code;
             Settings.Current.Save();
-            onChange();
+            // Rebuilt once the click is over, not from inside the button being clicked (it's replaced).
+            Application.Current.Dispatcher.BeginInvoke(onChange);
         });
 
     /// <summary>Auto, 100%…150%: the whole notch drawn bigger.</summary>

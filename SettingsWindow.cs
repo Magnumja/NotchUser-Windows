@@ -45,6 +45,11 @@ public sealed class SettingsWindow : GlassWindow
     private void Build()
     {
         _rows.Clear();
+        // Built again when the language changes: the parts kept across builds leave the old layout
+        // first (WPF refuses an element that still has a parent, and the app closed).
+        (_highlight.Parent as Panel)?.Children.Remove(_highlight);
+        (_contentHost.Parent as Panel)?.Children.Remove(_contentHost);
+        _contentHost.Children.Clear();
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(214) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1) });
@@ -99,6 +104,9 @@ public sealed class SettingsWindow : GlassWindow
         var row = new StackPanel { Orientation = Orientation.Horizontal, Height = RowHeight, Margin = new Thickness(8, 0, 8, RowGap), Background = Brushes.Transparent, Cursor = Cursors.Hand };
         row.Children.Add(badge);
         row.Children.Add(text);
+        // Taken here, or the press would reach the window and start dragging it, and the drag
+        // swallows the release: clicking a section did nothing.
+        row.MouseLeftButtonDown += (_, e) => e.Handled = true;
         row.MouseLeftButtonUp += (_, _) => Select(pane, animate: true);
         _rows.Add((pane, badge, text));
         return row;
@@ -154,9 +162,20 @@ public sealed class SettingsWindow : GlassWindow
                 behavior.Children.Add(Toggle(L("notices"), Settings.Current.Notices, on => Settings.Current.Notices = on));
                 behavior.Children.Add(Ui.Switch(L("launchAtLogin"), Settings.LaunchAtLogin, on => Settings.LaunchAtLogin = on));
                 Add(Ui.Section(L("behavior"), behavior));
+                Add(Ui.Section(L("appsInNotch"), AppsList()));
                 break;
             case Pane.Appearance:
                 Add(Ui.Section(L("size"), Ui.SizePicker()));
+                Add(Ui.Section(L("indicator"), Ui.Segmented("indicator",
+                    new[] { ("bars", L("indicatorBars")), ("wave", L("indicatorWave")) }, Settings.Current.Indicator, v =>
+                    {
+                        if (Settings.Current.Indicator == v) return;
+                        Settings.Current.Indicator = v;
+                        Settings.Current.Save();
+                    })));
+                var pill = new StackPanel();
+                pill.Children.Add(Toggle(L("clockInPill"), Settings.Current.ClockInPill, on => Settings.Current.ClockInPill = on));
+                Add(Ui.Section("", pill), 10);
                 break;
             default:
                 Add(Ui.Section("", Ui.AddOns()));
@@ -165,6 +184,32 @@ public sealed class SettingsWindow : GlassWindow
                 Add(hint, 6);
                 break;
         }
+        return stack;
+    }
+
+    /// <summary>
+    /// One switch per app that plays media (the ones playing now and the ones already turned off):
+    /// off keeps that app out of the notch.
+    /// </summary>
+    private static FrameworkElement AppsList()
+    {
+        var stack = new StackPanel();
+        var hidden = Settings.Current.HiddenApps;
+        var ids = (MediaService.Current?.AllAppIds ?? new List<string>())
+            .Concat(hidden).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(MediaService.AppName, StringComparer.CurrentCultureIgnoreCase).ToList();
+        foreach (var id in ids)
+        {
+            stack.Children.Add(Toggle(MediaService.AppName(id), !hidden.Contains(id, StringComparer.OrdinalIgnoreCase), on =>
+            {
+                hidden.RemoveAll(h => string.Equals(h, id, StringComparison.OrdinalIgnoreCase));
+                if (!on) hidden.Add(id);
+            }));
+        }
+        var hint = Ui.Text(L("appsHint"), 10.5, opacity: 0.55);
+        hint.TextWrapping = TextWrapping.Wrap;
+        hint.Margin = new Thickness(0, ids.Count > 0 ? 4 : 0, 0, 2);
+        stack.Children.Add(hint);
         return stack;
     }
 

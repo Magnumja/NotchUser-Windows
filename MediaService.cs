@@ -48,10 +48,34 @@ public sealed class MediaService
     /// <summary>Read when something changes, not on every redraw (each call is a round trip to Windows).</summary>
     public IReadOnlyList<GlobalSystemMediaTransportControlsSession> Sessions => _sessions;
 
+    /// <summary>The one running, so Settings can list the apps that play media.</summary>
+    public static MediaService? Current { get; private set; }
+
+    public MediaService() => Current = this;
+
+    /// <summary>Every app with a media session right now, hidden ones included (for Settings).</summary>
+    public IReadOnlyList<string> AllAppIds
+    {
+        get
+        {
+            try { return _manager?.GetSessions().Select(s => s.SourceAppUserModelId).Distinct().ToList() ?? new List<string>(); }
+            catch { return new List<string>(); }
+        }
+    }
+
+    private static bool Hidden(GlobalSystemMediaTransportControlsSession s) =>
+        Settings.Current.HiddenApps.Contains(s.SourceAppUserModelId, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The sessions the notch may show: all of them but the apps turned off in Settings.</summary>
+    private List<GlobalSystemMediaTransportControlsSession> Visible() =>
+        _manager?.GetSessions().Where(s => !Hidden(s)).ToList() ?? new List<GlobalSystemMediaTransportControlsSession>();
+
     public async Task StartAsync()
     {
         try { _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync(); }
         catch { return; }
+        // An app turned off (or back on) in Settings: choose again.
+        Settings.Changed += () => OnUi(Select);
         _settle.Tick += (_, _) => { _settle.Stop(); _ = RefreshAsync(); };
         // These events arrive on background threads; everything here runs on the UI thread.
         _manager.SessionsChanged += (_, _) => OnUi(Select);
@@ -65,9 +89,11 @@ public sealed class MediaService
     private void Select()
     {
         if (_manager == null) return;
-        var sessions = _manager.GetSessions();
+        var sessions = Visible();
+        var current = _manager.GetCurrentSession();
         var next = sessions.FirstOrDefault(s => s.SourceAppUserModelId == _pinned)
-                   ?? _manager.GetCurrentSession()
+                   ?? (current != null && !Hidden(current) ? current : null)
+                   ?? sessions.FirstOrDefault(IsPlaying)
                    ?? sessions.FirstOrDefault();
         if (next == null || next.SourceAppUserModelId != _pinned) _pinned = null;
 
@@ -157,7 +183,7 @@ public sealed class MediaService
         }
         try
         {
-            _sessions = _manager?.GetSessions().ToList() ?? new List<GlobalSystemMediaTransportControlsSession>();
+            _sessions = Visible();
             SourcesKey = string.Join("|", _sessions.Select(x => x.SourceAppUserModelId + (IsPlaying(x) ? "+" : ""))) + "|" + SourceId;
         }
         catch { }
