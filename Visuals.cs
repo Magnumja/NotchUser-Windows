@@ -179,7 +179,11 @@ public static class Motion
         e.MouseLeave += (_, _) => To(1);
     }
 
-    /// <summary>A loop sampled from <paramref name="f"/>, so it repeats without a seam (like the Mac's Core Animation loops).</summary>
+    /// <summary>
+    /// A loop sampled from <paramref name="f"/>, so it repeats without a seam (like the Mac's Core Animation loops).
+    /// Loops run all the time while music plays, and on a transparent window every frame redraws the
+    /// whole window, so they stay at 30 fps: plenty for little bars, half the work of 60.
+    /// </summary>
     public static DoubleAnimationUsingKeyFrames Loop(double duration, int steps, Func<double, double> f)
     {
         var a = new DoubleAnimationUsingKeyFrames { RepeatBehavior = RepeatBehavior.Forever, Duration = TimeSpan.FromSeconds(duration) };
@@ -188,7 +192,7 @@ public static class Motion
             var t = (double)i / steps * duration;
             a.KeyFrames.Add(new LinearDoubleKeyFrame(f(t), KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t))));
         }
-        Timeline.SetDesiredFrameRate(a, Fps);
+        Timeline.SetDesiredFrameRate(a, 30);
         return a;
     }
 }

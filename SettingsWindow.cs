@@ -156,7 +156,6 @@ public sealed class SettingsWindow : GlassWindow
                 Add(Ui.Section(L("behavior"), behavior));
                 break;
             case Pane.Appearance:
-                Add(Ui.Section("", Ui.StylePicker()));
                 Add(Ui.Section(L("size"), Ui.SizePicker()));
                 break;
             default:

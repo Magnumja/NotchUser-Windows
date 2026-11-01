@@ -14,8 +14,11 @@ public sealed class Settings
     /// at every song gets in the way (the closed notch still gives a small hop).
     /// </summary>
     public bool PeekOnTrackChange { get; set; }
-    /// <summary>How the notch looks: "basic" (plain black), "elevated" (depth and glow) or "glass".</summary>
-    public string Style { get; set; } = "basic";
+    /// <summary>
+    /// The notch has one look now: vivid black with the album's color rising from the bottom.
+    /// (Elevated and Glass cost too much on a transparent window.) Kept so old settings files still load.
+    /// </summary>
+    public string Style { get => "basic"; set { } }
     /// <summary>The welcome walkthrough has been seen.</summary>
     public bool Onboarded { get; set; }
     /// <summary>Add-on: copy text from the screen with Ctrl+Shift+2 (off until turned on).</summary>
@@ -29,8 +32,8 @@ public sealed class Settings
     /// <summary>Notch size: 0 = automatic, else a scale like 1.15.</summary>
     public double Size { get; set; }
 
-    public bool Lifted => Style != "basic";
-    public bool Glass => Style == "glass";
+    public bool Lifted => false;
+    public bool Glass => false;
 
     /// <summary>The scale actually used: the chosen one, or one that suits the screen.</summary>
     public double Scale => Size > 0 ? Size : SystemParameters.PrimaryScreenWidth >= 2400 ? 1.15 : 1.0;

@@ -85,7 +85,6 @@ public sealed class OnboardingWindow : GlassWindow
         stack.Children.Add(Gap(Ui.Text(L("welcomeSub"), 14, opacity: 0.55, align: TextAlignment.Center), 14));
         // Changing the language redraws the walkthrough in the new language.
         stack.Children.Add(Gap(Ui.Section(L("language"), Ui.LanguagePicker(Build)), 22));
-        stack.Children.Add(Gap(Ui.Section(L("appearance"), Ui.StylePicker()), 14));
         return stack;
     }
 

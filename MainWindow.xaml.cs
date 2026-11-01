@@ -91,7 +91,6 @@ public partial class MainWindow : Window
         InitializeComponent();
         BuildCollapsed();
         BuildExpanded();
-        UnderGlow.Fill = _accentBrush;
         _lyric.Foreground = _accentBrush;
 
         NotchHost.SizeChanged += (_, _) => UpdateShape();
@@ -159,6 +158,7 @@ public partial class MainWindow : Window
 
         _media.Changed += Refresh;
         _media.TrackChanged += OnTrackChanged;
+        _media.PositionChanged += () => { UpdateProgress(); UpdateLyric(animate: true); };
         _volume.Changed += fromUs =>
         {
             UpdateVolume();
@@ -214,17 +214,27 @@ public partial class MainWindow : Window
     public double TopRadius { get => (double)GetValue(TopRadiusProperty); set => SetValue(TopRadiusProperty, value); }
     public double BottomRadius { get => (double)GetValue(BottomRadiusProperty); set => SetValue(BottomRadiusProperty, value); }
 
-    /// <summary>Redraws the outline at the notch's current (animated) size: clip, rim and shadows share it.</summary>
+    private bool _shapeQueued;
+
+    /// <summary>
+    /// Size and both corner radii animate together, and each change asks for a new outline:
+    /// they're merged into one redraw per frame, just before it's drawn.
+    /// </summary>
     private void UpdateShape()
+    {
+        if (_shapeQueued) return;
+        _shapeQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => { _shapeQueued = false; DrawShape(); });
+    }
+
+    /// <summary>Redraws the outline at the notch's current (animated) size: the clip and the rim share it.</summary>
+    private void DrawShape()
     {
         double w = NotchHost.ActualWidth, h = NotchHost.ActualHeight;
         if (w <= 0 || h <= 0) { w = NotchHost.Width; h = NotchHost.Height; }
         var shape = NotchShape.Create(w, h, TopRadius, BottomRadius);
         Notch.Clip = shape;
-        RimGlow.Data = RimLine.Data = shape;
-        AmbientShadow.Data = NearShadow.Data = Halo.Data = shape;
-        ShadowLayer.Clip = Frozen(new CombinedGeometry(GeometryCombineMode.Exclude, new RectangleGeometry(new Rect(-300, -300, w + 600, h + 600)), shape));
-        UnderGlow.Width = w * 0.55;
+        RimLine.Data = shape;
     }
 
     /// <summary>The cursor is on the open notch or just outside it (8 px to the sides, 16 below).</summary>
@@ -326,7 +336,6 @@ public partial class MainWindow : Window
     private readonly Border _cover = new() { Width = 56, Height = 56, CornerRadius = new CornerRadius(56 * 0.22), Cursor = Cursors.Hand, Background = White(0.1) };
     private readonly Border _coverGlint = new() { CornerRadius = new CornerRadius(56 * 0.22), IsHitTestVisible = false, Opacity = 0 };
     private readonly Grid _coverBox = new() { Width = 56, Height = 56 };
-    private readonly DropShadowEffect _coverShadow = new() { Direction = 270, ShadowDepth = 3, BlurRadius = 20, Opacity = 0.35, Color = Colors.White };
     private readonly Marquee _title = new(15, FontWeights.SemiBold, Brushes.White, 19);
     private readonly Marquee _artist = new(13, FontWeights.Medium, White(0.65), 17);
     private readonly TextBlock _lyric = new() { FontSize = 12, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, Height = 16, Margin = new Thickness(0, 2, 0, 0), Visibility = Visibility.Collapsed };
@@ -394,7 +403,6 @@ public partial class MainWindow : Window
         _cover.Child = Icons.Glyph("\uEC4F", 18, White(0.5));
         _coverBox.Children.Add(_cover);
         _coverBox.Children.Add(_coverGlint);
-        _coverBox.Effect = _coverShadow;
         _coverBox.RenderTransformOrigin = new Point(0.5, 0.5);
         _coverBox.RenderTransform = new TransformGroup { Children = { new ScaleTransform(), new SkewTransform(), new ScaleTransform() } };
         _coverBox.MouseLeftButtonUp += (_, _) => _media.OpenPlayer();
@@ -570,7 +578,6 @@ public partial class MainWindow : Window
         _emptySection.Visibility = !showMedia && !showShelf && !toast ? Visibility.Visible : Visibility.Collapsed;
         _shelfWell.Visibility = _dragging ? Visibility.Collapsed : Visibility.Visible;
         _dropZone.Visibility = _dragging ? Visibility.Visible : Visibility.Collapsed;
-        Waves.Visibility = Settings.Current.Glass && showMedia && !toast ? Visibility.Visible : Visibility.Collapsed;
         if (_toast is { } t)
         {
             _toastIcon.Text = t.Glyph;
@@ -596,7 +603,7 @@ public partial class MainWindow : Window
         _lyric.Visibility = LyricShown() ? Visibility.Visible : Visibility.Collapsed;
         SetCover(_media.Cover);
         if (_shownPlaying != _media.Playing) SetPlaying(_media.Playing);
-        var sourcesKey = string.Join("|", _media.Sessions.Select(x => x.SourceAppUserModelId + (MediaService.IsPlaying(x) ? "+" : ""))) + "|" + _media.SourceId;
+        var sourcesKey = _media.SourcesKey;
         if (sourcesKey != _sourcesKey) RebuildSources(sourcesKey);
         if (ShelfKey() != _shelfKey) RebuildShelf();
         UpdateDropZone();
@@ -614,16 +621,9 @@ public partial class MainWindow : Window
         _pillWave.Playing = pillOn && glassStyle;
         _bigBars.Playing = bigOn && !glassStyle;
         _bigWave.Playing = bigOn && glassStyle;
-        Waves.Playing = _media.Playing && _expanded;
         UpdateLyricsSource();
         if (_lyrics.Count > 0 && _media.Playing && running) _lyricsTick.Start(); else _lyricsTick.Stop();
         if (_expanded && _media.Playing && running) _progressTick.Start(); else _progressTick.Stop();
-        var glow = Settings.Current.Lifted && _media.Playing && !_expanded && hasMedia;
-        if (UnderGlow.Tag as bool? != glow)
-        {
-            UnderGlow.Tag = glow;
-            Motion.Fade(UnderGlow, glow ? 0.75 : 0, 0.4);
-        }
 
         // Size: one spring per kind of change, as on the Mac.
         Size size;
@@ -696,7 +696,6 @@ public partial class MainWindow : Window
         BeginAnimation(BottomRadiusProperty, SpringEase.To(expanded ? 32 : 10, 0.42, 0.76));
         Motion.Fade(Backdrop, expanded ? 1 : 0, expanded ? 0.3 : 0.25);
         Motion.Fade(CollapsedBlack, expanded ? 0 : 1, expanded ? 0.3 : 0.25);
-        Motion.Fade(RimGlow, expanded ? 1 : 0, 0.3);
         Motion.Fade(RimLine, expanded ? 1 : 0, 0.3);
 
         if (expanded) ShowExpandedContent(); else HideExpandedContent();
@@ -734,7 +733,13 @@ public partial class MainWindow : Window
             move.BeginAnimation(TranslateTransform.YProperty, null);
             move.Y = 0;
             scale.ScaleX = scale.ScaleY = 0.9;
-            Expanded.BeginAnimation(OpacityProperty, SpringEase.To(1, 0.4, 0.8, 0.05));
+            // While it grows in, the content is drawn once into a texture and only scaled, instead
+            // of laying out and drawing every text again on each frame.
+            var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX * Settings.Current.Scale;
+            Expanded.CacheMode = new BitmapCache(dpi);
+            var appear = SpringEase.To(1, 0.4, 0.8, 0.05);
+            appear.Completed += (_, _) => Expanded.CacheMode = null;
+            Expanded.BeginAnimation(OpacityProperty, appear);
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.4, 0.8, 0.05));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.4, 0.8, 0.05));
         }
@@ -759,25 +764,13 @@ public partial class MainWindow : Window
         UpdateShadows(_media.HasMedia && !_dragging);
     }
 
-    /// <summary>A halo in the album's color, then the drop shadow (two layers when elevated: close and ambient).</summary>
+    /// <summary>The album's color rises from the bottom of the open notch while there's music (none without).</summary>
     private void UpdateShadows(bool showMedia)
     {
-        var lifted = Settings.Current.Lifted;
-        var glass = Settings.Current.Glass;
-        var haloOpacity = _expanded ? (glass ? 0.3 : lifted ? 0.22 : 0.18) : 0;
-        var near = _expanded || _lift;
-        var ambient = lifted && _expanded;
-        var state = (haloOpacity, near, ambient, _lift, showMedia, _accent);
-        if (Halo.Tag is ValueTuple<double, bool, bool, bool, bool, Color> old && old.Equals(state)) return;
-        Halo.Tag = state;
-
-        HaloEffect.BlurRadius = lifted ? 64 : 48;
-        HaloEffect.BeginAnimation(DropShadowEffect.ColorProperty, new ColorAnimation(showMedia ? _accent : Colors.White, TimeSpan.FromSeconds(0.5)));
-        Motion.Fade(Halo, haloOpacity, 0.35);
-        NearEffect.BlurRadius = _expanded ? (lifted ? 20 : 36) : 12;
-        NearEffect.ShadowDepth = _expanded ? (lifted ? 5 : 8) : 3;
-        Motion.Fade(NearShadow, near ? 1 : 0, 0.3);
-        Motion.Fade(AmbientShadow, ambient ? 1 : 0, 0.35);
+        var on = showMedia ? 0.55 : 0;
+        if (AccentGlow.Tag as double? == on) return;
+        AccentGlow.Tag = on;
+        AccentGlow.BeginAnimation(OpacityProperty, Motion.Ease(on, 0.4));
     }
 
     /// <summary>The look of each style (Settings → Appearance, or right-click the notch).</summary>
@@ -787,12 +780,6 @@ public partial class MainWindow : Window
         var glass = style == "glass";
         var elevated = style == "elevated";
         // No real backdrop blur on a layered window: Glass is a more see-through surface instead.
-        BackdropFill.Fill = glass ? Brush(Color.FromRgb(0x1C, 0x1C, 0x22), 0.78) : Brush(Color.FromRgb(0x1C, 0x1C, 0x1F), 0.95);
-        BackdropDim.Fill = Black(glass ? 0.22 : 0.28);
-        BackdropArt.Opacity = glass ? 0.55 : 0.4;
-        ElevatedSheen.Visibility = elevated ? Visibility.Visible : Visibility.Collapsed;
-        GlassSheen.Visibility = glass ? Visibility.Visible : Visibility.Collapsed;
-        RimGlow.Stroke = White(glass ? 0.16 : 0.10);
         RimMid.Color = Color.FromArgb((byte)((glass ? 0.16 : 0.10) * 255), 255, 255, 255);
         RimEnd.Color = Color.FromArgb((byte)((glass ? 0.45 : 0.28) * 255), 255, 255, 255);
 
@@ -807,7 +794,7 @@ public partial class MainWindow : Window
         _controls.Padding = new Thickness(style == "basic" ? 0 : 6, 0, style == "basic" ? 0 : 6, 0);
         _texts.Effect = glass ? new DropShadowEffect { Color = Colors.Black, Opacity = 0.45, BlurRadius = 4, ShadowDepth = 1, Direction = 270 } : null;
         _shownPlaying = null;
-        Halo.Tag = null;
+        AccentGlow.Tag = null;
         UpdateCollapsed(_media.HasMedia, _hud && !_expanded);
     }
 
@@ -857,10 +844,8 @@ public partial class MainWindow : Window
             // The album's color fades over (Mac: ease-in-out 0.5 s).
             _accentBrush.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(accent, TimeSpan.FromSeconds(0.5)) { EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } });
             _pillWave.Color = _bigWave.Color = accent;
-            Waves.Color = accent;
             _lyric.Foreground = _accentBrush;
-            _coverShadow.BeginAnimation(DropShadowEffect.ColorProperty, new ColorAnimation(accent, TimeSpan.FromSeconds(0.5)));
-            UnderGlow.Fill = _accentBrush;
+            GlowBottom.BeginAnimation(GradientStop.ColorProperty, new ColorAnimation(Deep(accent), TimeSpan.FromSeconds(0.5)));
             _pillBars.SetGlow(Settings.Current.Style == "elevated", accent);
             _bigBars.SetGlow(Settings.Current.Style == "elevated", accent);
         }
@@ -869,9 +854,17 @@ public partial class MainWindow : Window
         _pillCover.Background = brush;
         _cover.Background = brush;
         _cover.Child = cover == null ? Icons.Glyph("\uEC4F", 18, White(0.5)) : null;
-        BackdropArt.Source = cover;
         // The new cover fades in over the old one (Mac: 0.3 s).
         foreach (var e in new UIElement[] { _cover, _pillCover }) e.BeginAnimation(OpacityProperty, Motion.Ease(1, 0.3, from: 0.3));
+    }
+
+    /// <summary>The album's color made deep and saturated, for the glow at the bottom (like a blue night sky).</summary>
+    private static Color Deep(Color c)
+    {
+        if (c == Colors.White) return Color.FromRgb(0x30, 0x30, 0x36);
+        var max = Math.Max(c.R, Math.Max(c.G, c.B));
+        double k = max == 0 ? 1 : 220.0 / max;
+        return Color.FromRgb((byte)Math.Min(255, c.R * k * 0.85), (byte)Math.Min(255, c.G * k * 0.85), (byte)Math.Min(255, c.B * k * 0.85));
     }
 
     /// <summary>Average color of the cover, brightened so it shows on black (same rule as the Mac version).</summary>
@@ -925,8 +918,6 @@ public partial class MainWindow : Window
         var s = lifted && !playing ? 0.9 : 1;
         Motion.Spring(scale, ScaleTransform.ScaleXProperty, s, 0.4, 0.65);
         Motion.Spring(scale, ScaleTransform.ScaleYProperty, s, 0.4, 0.65);
-        _coverShadow.BeginAnimation(DropShadowEffect.OpacityProperty, Motion.Ease(lifted && playing ? 0.5 : 0.35, 0.4));
-        _coverShadow.BlurRadius = lifted && playing ? 28 : 20;
     }
 
     /// <summary>
@@ -985,7 +976,9 @@ public partial class MainWindow : Window
         var duration = _media.Duration;
         if (!_expanded || _seeking) return;
         var position = duration > 0 ? _media.LivePosition : 0;
-        _trackFill.Width = duration > 0 ? Math.Max(0, _track.ActualWidth * position / duration) : 0;
+        // A new width means a new layout pass: only when the bar visibly moves (half a pixel), not on every tick.
+        var width = duration > 0 ? Math.Max(0, _track.ActualWidth * position / duration) : 0;
+        if (double.IsNaN(_trackFill.Width) || Math.Abs(_trackFill.Width - width) >= 0.5) _trackFill.Width = width;
         _elapsed.Text = Clock(position);
         _remaining.Text = "-" + Clock(Math.Max(duration - position, 0));
     }
@@ -1614,11 +1607,6 @@ public partial class MainWindow : Window
             menu.Items.Add(Item(L("copyTextFromScreen"), "\uE8C8", () => Dispatcher.BeginInvoke(CopyTextFromScreen), gesture: "Ctrl+Shift+2"));
             menu.Items.Add(new Separator());
         }
-
-        menu.Items.Add(Header(L("appearance")));
-        foreach (var (style, glyph) in new[] { ("basic", "\uE91F"), ("elevated", "\uE81E"), ("glass", "\uEB42") })
-            menu.Items.Add(Item(L("style." + style), glyph, () => { s.Style = style; s.Save(); }, s.Style == style));
-        menu.Items.Add(new Separator());
 
         menu.Items.Add(Header(L("behavior")));
         menu.Items.Add(Item(L("peekOnTrack"), "\uEC4F", () => { s.PeekOnTrackChange = !s.PeekOnTrackChange; s.Save(); }, s.PeekOnTrackChange));

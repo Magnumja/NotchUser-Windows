@@ -18,6 +18,16 @@ public sealed class MediaService
 
     public event Action? Changed;
     public event Action? TrackChanged;
+    /// <summary>The position jumped (a seek): only the progress bar and the lyrics need to follow.</summary>
+    public event Action? PositionChanged;
+
+    // Several events often arrive at once (a new song: properties, playback, timeline): read once.
+    private readonly System.Windows.Threading.DispatcherTimer _settle = new() { Interval = TimeSpan.FromMilliseconds(60) };
+    private string _shown = "";
+    private IReadOnlyList<GlobalSystemMediaTransportControlsSession> _sessions = Array.Empty<GlobalSystemMediaTransportControlsSession>();
+
+    /// <summary>The apps with a media session and which of them play, plus the shown one: changes when the switcher would.</summary>
+    public string SourcesKey { get; private set; } = "";
 
     public string Title { get; private set; } = "";
     public string Artist { get; private set; } = "";
@@ -35,13 +45,14 @@ public sealed class MediaService
     public double LivePosition =>
         Math.Clamp(_position + (Playing ? (DateTime.UtcNow - _positionAt).TotalSeconds : 0), 0, Math.Max(Duration, 0));
 
-    public IReadOnlyList<GlobalSystemMediaTransportControlsSession> Sessions =>
-        _manager?.GetSessions().ToList() ?? new List<GlobalSystemMediaTransportControlsSession>();
+    /// <summary>Read when something changes, not on every redraw (each call is a round trip to Windows).</summary>
+    public IReadOnlyList<GlobalSystemMediaTransportControlsSession> Sessions => _sessions;
 
     public async Task StartAsync()
     {
         try { _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync(); }
         catch { return; }
+        _settle.Tick += (_, _) => { _settle.Stop(); _ = RefreshAsync(); };
         // These events arrive on background threads; everything here runs on the UI thread.
         _manager.SessionsChanged += (_, _) => OnUi(Select);
         _manager.CurrentSessionChanged += (_, _) => OnUi(Select);
@@ -66,20 +77,40 @@ public sealed class MediaService
             {
                 _session.MediaPropertiesChanged -= OnSessionChanged;
                 _session.PlaybackInfoChanged -= OnSessionChanged;
-                _session.TimelinePropertiesChanged -= OnSessionChanged;
+                _session.TimelinePropertiesChanged -= OnTimelineChanged;
             }
             _session = next;
             if (_session != null)
             {
                 _session.MediaPropertiesChanged += OnSessionChanged;
                 _session.PlaybackInfoChanged += OnSessionChanged;
-                _session.TimelinePropertiesChanged += OnSessionChanged;
+                _session.TimelinePropertiesChanged += OnTimelineChanged;
             }
         }
         _ = RefreshAsync();
     }
 
-    private void OnSessionChanged(GlobalSystemMediaTransportControlsSession s, object args) => OnUi(() => _ = RefreshAsync());
+    private void OnSessionChanged(GlobalSystemMediaTransportControlsSession s, object args) => OnUi(() => { _settle.Stop(); _settle.Start(); });
+
+    /// <summary>
+    /// Browsers report the position several times a second. The position moves on by itself
+    /// (LivePosition), so only a real jump (a seek) matters, and it needs no other reading.
+    /// </summary>
+    private void OnTimelineChanged(GlobalSystemMediaTransportControlsSession s, object args) => OnUi(() =>
+    {
+        if (s != _session) return;
+        try
+        {
+            var timeline = s.GetTimelineProperties();
+            var duration = (timeline.EndTime - timeline.StartTime).TotalSeconds;
+            var predicted = LivePosition;
+            _position = timeline.Position.TotalSeconds;
+            _positionAt = timeline.LastUpdatedTime.UtcDateTime;
+            if (Math.Abs(duration - Duration) > 0.5) { Duration = duration; _settle.Stop(); _settle.Start(); }
+            else if (Math.Abs(LivePosition - predicted) > 1.5) PositionChanged?.Invoke();
+        }
+        catch { }
+    });
 
     private async Task RefreshAsync()
     {
@@ -90,6 +121,9 @@ public sealed class MediaService
             Playing = false;
             Cover = null;
             _trackKey = "";
+            _shown = "";
+            _sessions = Array.Empty<GlobalSystemMediaTransportControlsSession>();
+            SourcesKey = "";
             Changed?.Invoke();
             return;
         }
@@ -121,6 +155,16 @@ public sealed class MediaService
         {
             // An app can vanish mid-read; the next event refreshes again.
         }
+        try
+        {
+            _sessions = _manager?.GetSessions().ToList() ?? new List<GlobalSystemMediaTransportControlsSession>();
+            SourcesKey = string.Join("|", _sessions.Select(x => x.SourceAppUserModelId + (IsPlaying(x) ? "+" : ""))) + "|" + SourceId;
+        }
+        catch { }
+        // Nothing the notch shows changed (the same state reported again): no redraw.
+        var shown = $"{Title}\n{Artist}\n{Playing}\n{Math.Round(Duration)}\n{Cover?.GetHashCode()}\n{SourcesKey}";
+        if (shown == _shown) { PositionChanged?.Invoke(); return; }
+        _shown = shown;
         Changed?.Invoke();
     }
 
