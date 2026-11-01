@@ -32,6 +32,8 @@ public sealed class SpringEase : IEasingFunction
     /// <summary>An animation to <paramref name="to"/> riding this spring, at the screen's refresh rate.</summary>
     public static DoubleAnimation To(double to, double response, double damping, double delay = 0, double? from = null)
     {
+        // Animations turned off in Windows: quick and with no bounce.
+        if (Motion.Reduced) (response, damping) = (0.2, 1);
         var ease = new SpringEase(response, damping);
         var a = new DoubleAnimation(to, ease.Duration) { EasingFunction = ease, BeginTime = TimeSpan.FromSeconds(delay) };
         if (from is double f) a.From = f;

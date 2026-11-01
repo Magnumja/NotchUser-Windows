@@ -23,9 +23,11 @@ O visual e as animações são os mesmos da versão do Mac: mesmo formato de not
   - **Vidro**: painel translúcido com reflexo e ondas na cor do álbum que seguem a música.
 - **Funciona com tudo que aparece nos controles de mídia do Windows**: Spotify, Chrome, Edge, Firefox, Media Player…
 - **Prateleira**: arraste arquivos, links ou texto em direção ao topo; o notch abre antes de você chegar na borda, com uma área grande "Solte aqui pra guardar". Miniaturas reais dos arquivos (as mesmas do Explorador). Clique para selecionar vários (aparece o ✓), dois cliques abrem, passe o mouse para ver o × que tira um item; botão direito tem Abrir, Mostrar no Explorador, Copiar, Selecionar tudo e Tirar.
-- **Volume no notch**: quando o volume muda (teclado, barra de tarefas ou outro app), o notch mostra o nível. No painel há um controle de volume (clique no alto-falante para silenciar), e **girar a roda do mouse sobre o notch** sobe e desce o volume.
-- **Avisos no notch**: carregador conectado ou desconectado, bateria fraca (20% e 10%) e troca da saída de som (ex.: fone Bluetooth conectou).
-- **Some em tela cheia**: jogos, vídeos e apresentações em tela cheia ficam sem o notch por cima.
+- **Volume e brilho no notch**: quando o volume ou o brilho da tela do notebook muda (teclado, barra de tarefas ou outro app), o notch mostra o nível. No painel há um controle de volume (clique no alto-falante para silenciar), e **girar a roda do mouse sobre o notch** sobe e desce o volume.
+- **Avisos no notch**: carregador conectado ou desconectado, bateria fraca (20% e 10%) e troca da saída de som (ex.: fone Bluetooth conectou), Caps Lock e Num Lock ligados ou desligados.
+- **Ponto de privacidade**, como no Mac: um pontinho verde na ponta do notch enquanto a câmera está em uso, laranja para o microfone.
+- **Some em tela cheia**: jogos, vídeos e apresentações em tela cheia ficam sem o notch por cima. A janela sai de vez (jogos em janela sem bordas continuam com o desempenho de tela cheia) e o app entra no modo de eficiência do Windows até a tela cheia acabar.
+- **Leve**: desenhado pelo processador (a placa de vídeo fica para os jogos e não trava em notebooks com duas GPUs), janela do tamanho da pílula enquanto está fechado e animações paradas com a tela bloqueada. Se as animações do Windows estiverem desligadas (Acessibilidade → Efeitos visuais), as molas assentam sem balançar.
 - **"Pulinho"** quando a música troca. Abrir o painel a cada música vem desligado, como no Mac.
 - **Complemento: copiar texto da tela.** Aperte **Ctrl+Shift+2**, arraste sobre qualquer pedaço da tela e o texto vai para a área de transferência. Usa o reconhecimento de texto do próprio Windows, sem internet; a imagem não é salva.
 - **Complemento: letras sincronizadas.** A linha que está sendo cantada aparece no notch fechado e no painel, na cor do álbum. As letras vêm do [LRCLIB](https://lrclib.net) (gratuito e aberto).
@@ -69,7 +71,8 @@ O executável fica em `dist\NotchUser.exe`. Na primeira vez o Windows pode mostr
 - `ScreenText.cs`: copiar texto da tela (captura, seleção e reconhecimento).
 - `Volume.cs`: volume e saída de som pelo Core Audio do Windows.
 - `Lyrics.cs`: letras sincronizadas (LRCLIB) e leitura do formato LRC.
-- `FullScreen.cs`, `Power.cs`: detectar tela cheia e ler a bateria.
+- `FullScreen.cs`, `Power.cs`: detectar tela cheia, ler a bateria e o modo de eficiência.
+- `Brightness.cs`, `Privacy.cs`: brilho da tela (WMI) e uso da câmera e do microfone.
 
 ## Licença
 

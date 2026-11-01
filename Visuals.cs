@@ -98,6 +98,9 @@ public static class Motion
     /// </summary>
     public static int Fps { get; } = DisplayHz();
 
+    /// <summary>Windows' "Animation effects" is off (Accessibility → Visual effects): springs settle without bouncing.</summary>
+    public static bool Reduced => !SystemParameters.ClientAreaAnimation;
+
     private static int DisplayHz()
     {
         var mode = new DEVMODE { dmSize = (short)System.Runtime.InteropServices.Marshal.SizeOf<DEVMODE>() };

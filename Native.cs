@@ -20,6 +20,9 @@ public static class Native
     /// <summary>The left mouse button is held down right now (anywhere on screen).</summary>
     public static bool LeftButtonDown => (GetAsyncKeyState(GetSystemMetrics(23 /* SM_SWAPBUTTON */) != 0 ? 0x02 : 0x01) & 0x8000) != 0;
 
+    /// <summary>A lock key (Caps Lock, Num Lock) is on. Windows keeps this state for every app, not just the one in front.</summary>
+    public static bool Toggled(int key) => (GetKeyState(key) & 1) != 0;
+
     /// <summary>Cursor position in screen pixels.</summary>
     public static (int X, int Y) Cursor => GetCursorPos(out var p) ? (p.X, p.Y) : (int.MinValue, int.MinValue);
 
@@ -30,6 +33,7 @@ public static class Native
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] private static extern short GetKeyState(int key);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
 }

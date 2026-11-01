@@ -18,6 +18,11 @@ public partial class App : Application
             return;
         }
 
+        // Drawn by the processor, not the graphics card. A transparent window drawn on the GPU has
+        // to be copied back from it on every frame, and on laptops with two GPUs (Intel + NVIDIA)
+        // that copy can stall for good: the notch freezes on its last frame (stuck open, or black).
+        // The notch is small, so the processor draws it easily, and it never competes with a game.
+        System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
         Motion.UseScreenRate();
         Motion.AnimateMenus();
         new MainWindow().Show();

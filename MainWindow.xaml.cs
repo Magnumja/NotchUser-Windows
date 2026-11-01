@@ -31,9 +31,12 @@ public partial class MainWindow : Window
     private const double PanelW = 470, Chrome = 14, Separator = 13;
     private const double MediaH = 124, ShelfH = 78, EmptyH = 84, ToastH = 52;
     private const double ItemW = 64, ItemGap = 4;
+    // The window while the notch is closed: room for the widest closed pill (a lyric line, 380) as it bumps (x1.07).
+    private const double CompactW = 420, CompactH = 44;
 
     private readonly MediaService _media = new();
     private readonly Volume _volume = new();
+    private readonly Brightness _brightness = new();
     private readonly Shelf _shelf = Shelf.Load();
     private readonly HashSet<ShelfEntry> _selected = new();
 
@@ -48,6 +51,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _batteryCheck = new() { Interval = TimeSpan.FromMinutes(1) };
     private readonly DispatcherTimer _dragPoll = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly DispatcherTimer _bumpBack = new() { Interval = TimeSpan.FromMilliseconds(160) };
+    private readonly DispatcherTimer _compactDelay = new() { Interval = TimeSpan.FromMilliseconds(900) };
+    private readonly DispatcherTimer _privacyCheck = new() { Interval = TimeSpan.FromSeconds(2) };
 
     // What the notch is doing.
     private bool _expanded;
@@ -62,6 +67,11 @@ public partial class MainWindow : Window
     private bool _hud;
     private bool _seeking, _settingVolume;
     private bool _hiddenForFullScreen;
+    private bool _locked;            // the session is locked (Win+L): nothing to animate for
+    private bool _compact;           // the window is cut down to the closed notch
+    private DateTime _trimmedAt;
+    private string _hudKind = "volume";  // what the closed pill's level shows: "volume", "brightness" or "text"
+    private bool? _capsLock, _numLock;
     private Toast? _toast;
     private Power.State? _power;
     private ShelfEntry? _pressed;
@@ -134,7 +144,22 @@ public partial class MainWindow : Window
         _lyricsTick.Tick += (_, _) => UpdateLyric(animate: true);
         _fullScreenCheck.Tick += (_, _) => CheckFullScreen();
         _batteryCheck.Tick += (_, _) => CheckPower();
-        _dragPoll.Tick += (_, _) => PollDrag();
+        _dragPoll.Tick += (_, _) => { PollDrag(); CheckHover(); CheckKeyLocks(); };
+        _compactDelay.Tick += (_, _) => { _compactDelay.Stop(); if (!NeedsFullWindow()) SetCompact(true); };
+        _privacyCheck.Tick += (_, _) => UpdatePrivacy();
+        _brightness.Changed += level =>
+        {
+            if (_expanded || !Settings.Current.VolumeHud) return;
+            _hudIcon.Text = "";
+            _hudFill.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(level / 100.0, 0.25, 0.85));
+            ShowHud("brightness");
+        };
+        // Locked (Win+L): the music bars and lyrics stop until the user is back.
+        SystemEvents.SessionSwitch += (_, e) =>
+        {
+            if (e.Reason is not (SessionSwitchReason.SessionLock or SessionSwitchReason.SessionUnlock)) return;
+            Dispatcher.BeginInvoke(() => { _locked = e.Reason == SessionSwitchReason.SessionLock; Refresh(); });
+        };
 
         // Drops: the catcher only opens the notch; the notch itself takes the drop.
         Root.DragEnter += OnDragOver;
@@ -200,6 +225,9 @@ public partial class MainWindow : Window
             if (_power?.HasBattery == true) _batteryCheck.Start();
             _fullScreenCheck.Start();
             _dragPoll.Start();
+            _privacyCheck.Start();
+            UpdatePrivacy();
+            _brightness.Start();
             await _media.StartAsync();
         };
     }
@@ -258,22 +286,57 @@ public partial class MainWindow : Window
         UpdateHotKey();
     }
 
-    /// <summary>Top middle of the main screen.</summary>
+    /// <summary>Top middle of the main screen (above it, off view, while something is full screen).</summary>
     private void PlaceWindow()
     {
         Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = 0;
+        Top = _hiddenForFullScreen ? -Height - 100 : 0;
     }
 
-    /// <summary>The Size setting: the whole notch, drawn bigger.</summary>
+    /// <summary>
+    /// The Size setting: the whole notch, drawn bigger. The window is the full open size only while
+    /// it's needed; closed, it's cut down to the pill (the layout stays put, shifted so the notch
+    /// stays in the middle). A transparent window is copied whole on every frame, so the small one
+    /// makes the music bars about eight times cheaper.
+    /// </summary>
     private void ApplyScale()
     {
         var scale = Settings.Current.Scale;
         if (Root.LayoutTransform is not ScaleTransform current || current.ScaleX != scale)
             Root.LayoutTransform = new ScaleTransform(scale, scale);
-        Width = Root.Width * scale;
-        Height = Root.Height * scale;
+        var (w, h) = _compact ? (CompactW, CompactH) : (Root.Width, Root.Height);
+        Root.HorizontalAlignment = HorizontalAlignment.Left;
+        Root.Margin = new Thickness(-(Root.Width - w) / 2 * scale, 0, 0, 0);
+        Width = w * scale;
+        Height = h * scale;
         PlaceWindow();
+    }
+
+    /// <summary>Open, carrying something in, or about to: the window needs its full size.</summary>
+    private bool NeedsFullWindow() => _expanded || _dragging || DragCatcher.Visibility == Visibility.Visible;
+
+    /// <summary>Full size right away when needed; back to compact once the closing spring has settled.</summary>
+    private void UpdateCompact()
+    {
+        if (NeedsFullWindow())
+        {
+            _compactDelay.Stop();
+            SetCompact(false);
+        }
+        else if (!_compact && !_compactDelay.IsEnabled) _compactDelay.Start();
+    }
+
+    private void SetCompact(bool compact)
+    {
+        if (_compact == compact) return;
+        _compact = compact;
+        ApplyScale();
+        // Closed for a while: hand back the memory the open panel used (at most once a minute).
+        if (compact && DateTime.UtcNow - _trimmedAt > TimeSpan.FromMinutes(1))
+        {
+            _trimmedAt = DateTime.UtcNow;
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, App.TrimMemory);
+        }
     }
 
     private const int GWL_EXSTYLE = -20, WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x80;
@@ -289,6 +352,7 @@ public partial class MainWindow : Window
     private readonly TextBlock _pillCount = new() { FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = White(0.8), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _hudIcon = Icons.Glyph("\uE995", 13, White(0.85));
     private readonly ScaleTransform _hudFill = new(0, 1);
+    private readonly TextBlock _hudText = new() { FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = White(0.85), VerticalAlignment = VerticalAlignment.Center };
 
     private void BuildCollapsed()
     {
@@ -308,7 +372,7 @@ public partial class MainWindow : Window
         if (hud)
         {
             left = _hudIcon;
-            right = _hudBar;
+            right = _hudKind == "text" ? _hudText : _hudBar;
         }
         else if (hasMedia)
         {
@@ -613,7 +677,7 @@ public partial class MainWindow : Window
         UpdateShadows(showMedia);
 
         // Only the indicator that can be seen moves: the pill's while closed, the panel's while open.
-        var running = !_hiddenForFullScreen;
+        var running = !_hiddenForFullScreen && !_locked;
         var glassStyle = Settings.Current.Glass;
         var pillOn = _media.Playing && running && !_expanded;
         var bigOn = _media.Playing && running && _expanded;
@@ -669,6 +733,7 @@ public partial class MainWindow : Window
                 Motion.Spring(NotchHost, HeightProperty, size.Height, response, damping);
             }
         }
+        UpdateCompact();
     }
 
     /// <summary>Opens or closes from everything that wants it open (Mac: NotchController.tick).</summary>
@@ -699,6 +764,7 @@ public partial class MainWindow : Window
         Motion.Fade(RimLine, expanded ? 1 : 0, 0.3);
 
         if (expanded) ShowExpandedContent(); else HideExpandedContent();
+        UpdatePrivacy();
         Refresh();
     }
 
@@ -829,6 +895,13 @@ public partial class MainWindow : Window
         _shelfKey = null;
         _sourcesKey = null;
         _trash.ToolTip = L("clearShelf");
+        // Icon-only buttons get names, so Narrator can read them.
+        foreach (var (e, key) in new (UIElement, string)[]
+        {
+            (_prev, "previousTrack"), (_play, "playPause"), (_next, "nextTrack"), (_volumeButton, "muteVolume"),
+            (_volumeTrack, "volume"), (_track, "progress"), (_coverBox, "openPlayer"), (_trash, "clearShelf"),
+        })
+            System.Windows.Automation.AutomationProperties.SetName(e, L(key));
     }
 
     // MARK: - Cover and album color
@@ -1028,13 +1101,15 @@ public partial class MainWindow : Window
 
     // MARK: - Volume
 
-    private void ShowHud()
+    /// <summary>A level (volume, brightness) or a short state ("Caps Lock on") in the closed pill.</summary>
+    private void ShowHud(string kind = "volume")
     {
         if (_toast != null || _hiddenForFullScreen) return;
+        _hudKind = kind;
         _hud = true;
         _hudTimer.Stop();
         _hudTimer.Start();
-        UpdateVolume();
+        if (kind == "volume") UpdateVolume();
         Refresh();
     }
 
@@ -1043,10 +1118,42 @@ public partial class MainWindow : Window
         var level = _volume.Muted ? 0 : _volume.Level;
         _volumeRow.Visibility = _volume.Available ? Visibility.Visible : Visibility.Hidden;
         _volumeFill.Width = _volumeTrack.Width * level;
-        _hudFill.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(level, 0.25, 0.85));
         var glyph = _volume.Muted || level <= 0 ? "\uE74F" : level < 0.34 ? "\uE993" : level < 0.67 ? "\uE994" : "\uE995";
         _volumeButton.Icon = Icons.Glyph(glyph, 15, White(0.7));
+        // The pill shows another level right now (brightness, Caps Lock): leave it be.
+        if (_hud && _hudKind != "volume") return;
+        _hudFill.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(level, 0.25, 0.85));
         _hudIcon.Text = glyph;
+    }
+
+    /// <summary>
+    /// Caps Lock and Num Lock, read on the same light poll as the mouse (a keyboard hook would sit
+    /// in front of every key pressed in every app, games included).
+    /// </summary>
+    private void CheckKeyLocks()
+    {
+        var caps = Native.Toggled(0x14 /* VK_CAPITAL */);
+        var num = Native.Toggled(0x90 /* VK_NUMLOCK */);
+        var (wasCaps, wasNum) = (_capsLock, _numLock);
+        (_capsLock, _numLock) = (caps, num);
+        if (!Settings.Current.Notices || _expanded) return;
+        string? name = wasCaps is bool c && c != caps ? "Caps Lock" : wasNum is bool n && n != num ? "Num Lock" : null;
+        if (name == null) return;
+        var on = name == "Caps Lock" ? caps : num;
+        _hudIcon.Text = "\uE765";
+        _hudText.Text = string.Format(L(on ? "lockOn" : "lockOff"), name);
+        ShowHud("text");
+    }
+
+    /// <summary>The privacy dot: camera (green) wins over microphone (orange); hidden while open.</summary>
+    private void UpdatePrivacy()
+    {
+        var (mic, camera) = Privacy.InUse();
+        var on = (mic || camera) && !_expanded;
+        PrivacyDot.Fill = Brush(camera ? Green : Orange);
+        if ((PrivacyDot.Visibility == Visibility.Visible) == on) return;
+        PrivacyDot.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (on) PrivacyDot.BeginAnimation(OpacityProperty, Motion.Ease(1, 0.3, from: 0));
     }
 
     // MARK: - Lyrics
@@ -1199,7 +1306,14 @@ public partial class MainWindow : Window
 
     // MARK: - Full screen
 
-    /// <summary>Step aside while a game, a video or a presentation fills the screen.</summary>
+    /// <summary>
+    /// Step aside while a game, a video or a presentation fills the screen. The whole window goes,
+    /// not just the notch: any window left on top of a borderless game, even an empty transparent
+    /// one, keeps Windows from handing the game the screen directly (more lag, fewer frames).
+    /// It moves off the screen rather than hiding: a transparent WPF window shown again after
+    /// Hide() can come back opaque black. Meanwhile the app goes quiet: no polling, efficiency
+    /// mode, lower priority.
+    /// </summary>
     private void CheckFullScreen()
     {
         var hide = FullScreen.IsActive(new WindowInteropHelper(this).Handle) && !_dragging;
@@ -1210,12 +1324,19 @@ public partial class MainWindow : Window
             _hoverOpen = _peeking = _hud = false;
             SetExpanded(false);
             NotchHost.Visibility = Visibility.Hidden;
+            _dragPoll.Stop();
+            _privacyCheck.Stop();
+            PlaceWindow();
         }
         else
         {
+            PlaceWindow();
+            _dragPoll.Start();
+            _privacyCheck.Start();
             NotchHost.Visibility = Visibility.Visible;
             NotchHost.BeginAnimation(OpacityProperty, Motion.Ease(1, 0.25, from: 0));
         }
+        Power.Quiet(hide);
         Refresh();
     }
 
@@ -1487,10 +1608,29 @@ public partial class MainWindow : Window
                       && Math.Abs(cursor.X - from.X) + Math.Abs(cursor.Y - from.Y) > 12;
         var catcher = dragged && !_draggingOut && !_hiddenForFullScreen && In(20, 0, Root.Width - 20, 220);
         DragCatcher.Visibility = catcher || _dragging ? Visibility.Visible : Visibility.Collapsed;
+        UpdateCompact();
         if (!down && _dragging) EndDrag();
     }
 
     private (DateTime At, Point From)? _pressStart;
+
+    /// <summary>
+    /// The cursor's real position settles hovering, as on the Mac (it polls the mouse too). Windows
+    /// doesn't always say the mouse left: another app holding the mouse (a game, its launcher) or a
+    /// quick flick swallows it, and the notch would stay open for good.
+    /// </summary>
+    private void CheckHover()
+    {
+        if (!_inside || _menuOpen || _seeking || _settingVolume || _dragging) return;
+        var (x, y) = Native.Cursor;
+        if (x == int.MinValue || PresentationSource.FromVisual(NotchHost) == null) return;
+        var p = NotchHost.PointFromScreen(new Point(x, y));
+        if (p.X >= 0 && p.X <= NotchHost.ActualWidth && p.Y >= 0 && p.Y <= NotchHost.ActualHeight) return;
+        _inside = false;
+        _hoverDelay.Stop();
+        if (!_leaveDelay.IsEnabled) _leaveDelay.Start();
+        UpdateLift();
+    }
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
