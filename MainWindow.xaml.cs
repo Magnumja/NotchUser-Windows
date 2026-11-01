@@ -112,7 +112,16 @@ public partial class MainWindow : Window
         };
         // Small delays so passing the cursor along the top doesn't pop it open, and a brief exit doesn't snap it shut.
         _hoverDelay.Tick += (_, _) => { _hoverDelay.Stop(); if (_inside) { _hoverOpen = true; UpdateExpanded(); } };
-        _leaveDelay.Tick += (_, _) => { _leaveDelay.Stop(); if (!_inside) { _hoverOpen = false; UpdateExpanded(); } };
+        _leaveDelay.Tick += (_, _) =>
+        {
+            _leaveDelay.Stop();
+            if (_inside) return;
+            // Open, it keeps a little slack below and beside it: reaching for its bottom edge
+            // (or overshooting a button) isn't leaving.
+            if (_expanded && NearNotch()) { _leaveDelay.Start(); return; }
+            _hoverOpen = false;
+            UpdateExpanded();
+        };
         _peekTimer.Tick += (_, _) => { _peekTimer.Stop(); _peeking = false; UpdateExpanded(); };
         _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); _toast = null; UpdateExpanded(); Refresh(); };
         _hudTimer.Tick += (_, _) => { _hudTimer.Stop(); _hud = false; Refresh(); };
@@ -216,6 +225,15 @@ public partial class MainWindow : Window
         AmbientShadow.Data = NearShadow.Data = Halo.Data = shape;
         ShadowLayer.Clip = Frozen(new CombinedGeometry(GeometryCombineMode.Exclude, new RectangleGeometry(new Rect(-300, -300, w + 600, h + 600)), shape));
         UnderGlow.Width = w * 0.55;
+    }
+
+    /// <summary>The cursor is on the open notch or just outside it (8 px to the sides, 16 below).</summary>
+    private bool NearNotch()
+    {
+        var (x, y) = Native.Cursor;
+        if (x == int.MinValue || PresentationSource.FromVisual(NotchHost) == null) return false;
+        var p = NotchHost.PointFromScreen(new Point(x, y));
+        return p.X >= -8 && p.X <= NotchHost.ActualWidth + 8 && p.Y >= -8 && p.Y <= NotchHost.ActualHeight + 16;
     }
 
     // MARK: - Window
@@ -629,13 +647,27 @@ public partial class MainWindow : Window
 
         if (size != _target)
         {
-            var (response, damping) = _expanded != _targetExpanded ? (0.42, 0.76)   // opening or closing
-                : _expanded ? (0.38, 0.8)                                             // sections come and go
-                : (0.4, 0.8);                                                         // the pill grows its sides
+            var toggling = _expanded != _targetExpanded;
+            var (response, damping) = toggling ? (0.42, 0.76)   // opening or closing
+                : _expanded ? (0.38, 0.8)                        // sections come and go
+                : (0.4, 0.8);                                    // the pill grows its sides
             _target = size;
             _targetExpanded = _expanded;
-            Motion.Spring(NotchHost, WidthProperty, size.Width, response, damping);
-            Motion.Spring(NotchHost, HeightProperty, size.Height, response, damping);
+            if (toggling)
+            {
+                // Like the Mac: opening, it spreads out of the edge first and then drops down;
+                // closing, it pulls up first and slips back in last.
+                var (lead, trail) = _expanded ? (WidthProperty, HeightProperty) : (HeightProperty, WidthProperty);
+                var leadTo = lead == WidthProperty ? size.Width : size.Height;
+                var trailTo = trail == WidthProperty ? size.Width : size.Height;
+                NotchHost.BeginAnimation(lead, SpringEase.To(leadTo, response * 0.8, damping));
+                NotchHost.BeginAnimation(trail, SpringEase.To(trailTo, response * 1.1, damping, delay: 0.035));
+            }
+            else
+            {
+                Motion.Spring(NotchHost, WidthProperty, size.Width, response, damping);
+                Motion.Spring(NotchHost, HeightProperty, size.Height, response, damping);
+            }
         }
     }
 

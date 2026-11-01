@@ -89,9 +89,55 @@ public static class Icons
     };
 }
 
-/// <summary>Shared animation helpers (60 fps, SwiftUI-like springs).</summary>
+/// <summary>Shared animation helpers (at the screen's own refresh rate, SwiftUI-like springs).</summary>
 public static class Motion
 {
+    /// <summary>
+    /// The display's refresh rate (60, 120, 144, 240…). WPF animates at 60 unless told otherwise,
+    /// which looks stuttery on fast screens; every timeline uses this instead.
+    /// </summary>
+    public static int Fps { get; } = DisplayHz();
+
+    private static int DisplayHz()
+    {
+        var mode = new DEVMODE { dmSize = (short)System.Runtime.InteropServices.Marshal.SizeOf<DEVMODE>() };
+        return EnumDisplaySettings(null, -1, ref mode) && mode.dmDisplayFrequency > 1 ? Math.Max(60, mode.dmDisplayFrequency) : 60;
+    }
+
+    /// <summary>
+    /// Menus appear like macOS's: a quick fade with a hint of growth from where they open.
+    /// Registered once for every context menu in the app.
+    /// </summary>
+    public static void AnimateMenus() =>
+        EventManager.RegisterClassHandler(typeof(ContextMenu), ContextMenu.OpenedEvent, new RoutedEventHandler((sender, _) =>
+        {
+            if (sender is not ContextMenu m || m.Template?.FindName("Surface", m) is not Border surface) return;
+            var (scale, _) = Transforms(surface, new Point(0, 0));
+            surface.BeginAnimation(UIElement.OpacityProperty, Ease(1, 0.12, from: 0, ease: new QuadraticEase { EasingMode = EasingMode.EaseOut }));
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.25, 0.85, from: 0.96));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.25, 0.85, from: 0.96));
+        }));
+
+    /// <summary>Called once at startup: timelines that don't set a rate use the screen's.</summary>
+    public static void UseScreenRate() =>
+        Timeline.DesiredFrameRateProperty.OverrideMetadata(typeof(Timeline), new FrameworkPropertyMetadata { DefaultValue = (int?)Fps });
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DEVMODE devMode);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+
     public static DoubleAnimation Ease(double to, double seconds, double delay = 0, double? from = null, IEasingFunction? ease = null)
     {
         var a = new DoubleAnimation(to, TimeSpan.FromSeconds(seconds))
@@ -100,7 +146,7 @@ public static class Motion
             EasingFunction = ease ?? new CubicEase { EasingMode = EasingMode.EaseInOut },
         };
         if (from is double f) a.From = f;
-        Timeline.SetDesiredFrameRate(a, 60);
+        Timeline.SetDesiredFrameRate(a, Fps);
         return a;
     }
 
@@ -142,7 +188,7 @@ public static class Motion
             var t = (double)i / steps * duration;
             a.KeyFrames.Add(new LinearDoubleKeyFrame(f(t), KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t))));
         }
-        Timeline.SetDesiredFrameRate(a, 30);
+        Timeline.SetDesiredFrameRate(a, Fps);
         return a;
     }
 }
@@ -407,7 +453,7 @@ public sealed class FlowingWavesView : Canvas
             _story.Children.Add(slide);
             _story.Children.Add(swell);
         }
-        Timeline.SetDesiredFrameRate(_story, 30);
+        Timeline.SetDesiredFrameRate(_story, Motion.Fps);
         _story.Begin(this, true);
         if (!_playing) { _story.Pause(this); Opacity = 0.4; }
     }

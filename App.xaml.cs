@@ -18,6 +18,8 @@ public partial class App : Application
             return;
         }
 
+        Motion.UseScreenRate();
+        Motion.AnimateMenus();
         new MainWindow().Show();
         if (!Settings.Current.Onboarded) new OnboardingWindow().Show();
     }

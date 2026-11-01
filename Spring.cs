@@ -29,13 +29,13 @@ public sealed class SpringEase : IEasingFunction
         return 1 - decay * (Math.Cos(_wd * t) + _zeta * _w0 / _wd * Math.Sin(_wd * t));
     }
 
-    /// <summary>A 60 fps animation to <paramref name="to"/> riding this spring.</summary>
+    /// <summary>An animation to <paramref name="to"/> riding this spring, at the screen's refresh rate.</summary>
     public static DoubleAnimation To(double to, double response, double damping, double delay = 0, double? from = null)
     {
         var ease = new SpringEase(response, damping);
         var a = new DoubleAnimation(to, ease.Duration) { EasingFunction = ease, BeginTime = TimeSpan.FromSeconds(delay) };
         if (from is double f) a.From = f;
-        Timeline.SetDesiredFrameRate(a, 60);
+        Timeline.SetDesiredFrameRate(a, Motion.Fps);
         return a;
     }
 }
