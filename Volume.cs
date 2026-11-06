@@ -104,6 +104,24 @@ public sealed class Volume
         try { _endpoint.SetMute(!Muted, ref _ours); } catch { }
     }
 
+    /// <summary>Mutes or unmutes the default microphone. Returns whether it is muted now, or null if there is none.</summary>
+    public static bool? ToggleMicrophone()
+    {
+        try
+        {
+            var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+            enumerator.GetDefaultAudioEndpoint(EDataFlow.Capture, ERole.Communications, out var device);
+            var iid = typeof(IAudioEndpointVolume).GUID;
+            device.Activate(ref iid, 1, IntPtr.Zero, out var o);
+            var endpoint = (IAudioEndpointVolume)o;
+            endpoint.GetMute(out var muted);
+            var context = _ours;
+            endpoint.SetMute(!muted, ref context);
+            return !muted;
+        }
+        catch { return null; }
+    }
+
     private static string FriendlyName(IMMDevice device)
     {
         try

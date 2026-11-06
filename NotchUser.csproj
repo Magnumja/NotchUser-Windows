@@ -13,7 +13,7 @@
     <AssemblyName>NotchUser</AssemblyName>
     <RootNamespace>NotchUser</RootNamespace>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
-    <Version>0.9.0</Version>
+    <Version>0.15.0</Version>
     <Product>NotchUser</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Lighter on memory: no background GC thread, and only the UI languages we ship. -->
@@ -21,6 +21,14 @@
     <TieredPGO>true</TieredPGO>
     <SatelliteResourceLanguages>en;pt;es</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The tests live in their own project, beside the app. -->
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+    <Page Remove="tests\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <Resource Include="Assets\AppIcon.ico" />

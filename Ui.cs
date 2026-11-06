@@ -212,6 +212,15 @@ public static class Ui
         });
 
 
+    /// <summary>70% to 150%, for one of the two notch sizes.</summary>
+    public static FrameworkElement ScalePicker(Func<double> get, Action<double> set) =>
+        Segmented("scale", Settings.SizeSteps.Select(v => (v, $"{v * 100:0}%")), get(), v =>
+        {
+            if (Math.Abs(get() - v) < 1e-6) return;
+            set(v);
+            Settings.Current.Save();
+        });
+
     /// <summary>The optional extras, all off until turned on.</summary>
     public static FrameworkElement AddOns()
     {
@@ -229,6 +238,16 @@ public static class Ui
         var hint = Text(L("lyricsHint"), 10.5, opacity: 0.55);
         hint.Margin = new Thickness(0, 0, 44, 2);
         stack.Children.Add(hint);
+        stack.Children.Add(Switch(L("addonHotkey"), Settings.Current.ToggleHotkey, on =>
+        {
+            Settings.Current.ToggleHotkey = on;
+            Settings.Current.Save();
+        }));
+        stack.Children.Add(Switch(L("addonMic"), Settings.Current.MicHotkey, on =>
+        {
+            Settings.Current.MicHotkey = on;
+            Settings.Current.Save();
+        }));
         return stack;
     }
 

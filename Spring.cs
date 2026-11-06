@@ -34,6 +34,11 @@ public sealed class SpringEase : IEasingFunction
     {
         // Animations turned off in Windows: quick and with no bounce.
         if (Motion.Reduced) (response, damping) = (0.2, 1);
+        else
+        {
+            response *= Motion.Speed;
+            if (damping < 1) damping = Math.Clamp(damping + Motion.Bounce, 0.3, 0.98);
+        }
         var ease = new SpringEase(response, damping);
         var a = new DoubleAnimation(to, ease.Duration) { EasingFunction = ease, BeginTime = TimeSpan.FromSeconds(delay) };
         if (from is double f) a.From = f;

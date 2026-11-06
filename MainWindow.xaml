@@ -28,9 +28,20 @@
 
             <!-- The notch itself, clipped to the notch outline. -->
             <Grid x:Name="Notch" Background="Transparent">
+                <!-- Collapsed: pure black, it has to look like part of the screen's edge. -->
+                <Rectangle x:Name="CollapsedBlack" Fill="Black" IsHitTestVisible="False"/>
+                <!-- Elevated and Glass: a soft light along the top of the closed pill (a gradient, no blur). -->
+                <Rectangle x:Name="PillSheen" Opacity="0" IsHitTestVisible="False">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
+                            <GradientStop Color="#33FFFFFF" Offset="0"/>
+                            <GradientStop Color="#00FFFFFF" Offset="0.6"/>
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
                 <!-- Expanded backdrop: vivid black, with the album's color rising from the bottom. -->
                 <Grid x:Name="Backdrop" Opacity="0" IsHitTestVisible="False">
-                    <Rectangle Fill="Black"/>
+                    <Rectangle x:Name="BackdropBlack" Fill="Black"/>
                     <Rectangle x:Name="AccentGlow" Opacity="0.55">
                         <Rectangle.Fill>
                             <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
@@ -39,10 +50,19 @@
                             </LinearGradientBrush>
                         </Rectangle.Fill>
                     </Rectangle>
-                </Grid>
 
-                <!-- Collapsed: pure black, it has to look like part of the screen's edge. -->
-                <Rectangle x:Name="CollapsedBlack" Fill="Black" IsHitTestVisible="False"/>
+
+                <!-- Elevated and Glass: a soft reflection across the top of the open panel (a gradient, no blur). -->
+                <Rectangle x:Name="Sheen" Opacity="0" IsHitTestVisible="False">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0.1,0" EndPoint="0.9,1">
+                            <GradientStop Color="#3CFFFFFF" Offset="0"/>
+                            <GradientStop Color="#0DFFFFFF" Offset="0.35"/>
+                            <GradientStop Color="#00FFFFFF" Offset="0.6"/>
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+                </Grid>
 
                 <!-- Collapsed content: cover on the left, bars on the right. -->
                 <Grid x:Name="Collapsed" Height="28" VerticalAlignment="Top" Margin="13,0" Opacity="0">
@@ -70,6 +90,7 @@
             </Grid>
 
             <!-- A hairline that brightens toward the bottom (black at the top), so the open notch reads on dark wallpapers. -->
+            <Path x:Name="PillRim" StrokeThickness="1.2" Opacity="0" IsHitTestVisible="False"/>
             <Path x:Name="RimLine" StrokeThickness="1" Opacity="0" IsHitTestVisible="False">
                 <Path.Stroke>
                     <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">

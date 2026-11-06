@@ -6,6 +6,7 @@ namespace NotchUser;
 public partial class App : Application
 {
     private Mutex? _single;
+    private EventWaitHandle? _wake;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -14,9 +15,17 @@ public partial class App : Application
         _single = new Mutex(true, "NotchUser.SingleInstance", out var first);
         if (!first)
         {
+            // Opened again: show Settings in the copy that's running (the way back if the notch is out of reach).
+            try { EventWaitHandle.OpenExisting("NotchUser.ShowSettings").Set(); } catch { }
             Shutdown();
             return;
         }
+        _wake = new EventWaitHandle(false, EventResetMode.AutoReset, "NotchUser.ShowSettings");
+        var waiter = new Thread(() =>
+        {
+            while (_wake.WaitOne()) Dispatcher.BeginInvoke(() => { (MainWindow as MainWindow)?.Wake(); SettingsWindow.ShowOrFocus(); });
+        }) { IsBackground = true };
+        waiter.Start();
 
         // A mistake in one button or menu must not close the whole notch: it's written to
         // %AppData%\NotchUser\errors.log and the app keeps running.

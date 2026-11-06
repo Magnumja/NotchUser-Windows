@@ -184,7 +184,7 @@
                     <ControlTemplate TargetType="ContextMenu">
                         <Grid x:Name="Surface">
                             <ContentControl Template="{StaticResource MenuShadow}" Focusable="False" IsTabStop="False"/>
-                            <Border Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
+                            <Border Background="#F51F1F21" BorderBrush="#2EFFFFFF" BorderThickness="0.8" CornerRadius="11" Padding="4" Margin="0,0,10,12">
                                 <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
                             </Border>
                         </Grid>
@@ -198,7 +198,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Separator">
-                        <Border Height="1" Margin="10,5" Background="#24FFFFFF"/>
+                        <Border Height="1" Margin="12,4" Background="#1CFFFFFF"/>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -206,7 +206,8 @@
 
         <ControlTemplate x:Key="MenuRow" TargetType="MenuItem">
             <Grid>
-                <Border x:Name="Bg" CornerRadius="5" Background="Transparent" Padding="6,4,10,4" MinWidth="220">
+                <Border x:Name="Bg" CornerRadius="7" Padding="8,6,10,6" MinWidth="236" Margin="0,1">
+                    <Border.Background><SolidColorBrush x:Name="BgBrush" Color="#00FFFFFF"/></Border.Background>
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="18"/>
@@ -232,7 +233,7 @@
                        PopupAnimation="Fade">
                     <Grid>
                         <ContentControl Template="{StaticResource MenuShadow}" Focusable="False" IsTabStop="False"/>
-                        <Border Background="#F2262628" BorderBrush="#33FFFFFF" BorderThickness="0.8" CornerRadius="9" Padding="5" Margin="0,0,10,12">
+                        <Border Background="#F51F1F21" BorderBrush="#2EFFFFFF" BorderThickness="0.8" CornerRadius="11" Padding="4" Margin="0,0,10,12">
                             <StackPanel IsItemsHost="True"/>
                         </Border>
                     </Grid>
@@ -246,7 +247,16 @@
                     <Setter TargetName="Arrow" Property="Visibility" Value="Visible"/>
                 </Trigger>
                 <Trigger Property="IsHighlighted" Value="True">
-                    <Setter TargetName="Bg" Property="Background" Value="#FF0A84FF"/>
+                    <Trigger.EnterActions>
+                        <BeginStoryboard><Storyboard>
+                            <ColorAnimation Storyboard.TargetName="BgBrush" Storyboard.TargetProperty="Color" To="#2CFFFFFF" Duration="0:0:0.09"/>
+                        </Storyboard></BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <BeginStoryboard><Storyboard>
+                            <ColorAnimation Storyboard.TargetName="BgBrush" Storyboard.TargetProperty="Color" To="#00FFFFFF" Duration="0:0:0.2"/>
+                        </Storyboard></BeginStoryboard>
+                    </Trigger.ExitActions>
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Opacity" Value="0.4"/>

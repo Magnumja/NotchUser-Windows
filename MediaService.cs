@@ -24,6 +24,10 @@ public sealed class MediaService
     // Several events often arrive at once (a new song: properties, playback, timeline): read once.
     private readonly System.Windows.Threading.DispatcherTimer _settle = new() { Interval = TimeSpan.FromMilliseconds(60) };
     private string _shown = "";
+    // Some players send the title first and the cover a moment later (some never do): look again a few times.
+    private readonly System.Windows.Threading.DispatcherTimer _coverRetry = new() { Interval = TimeSpan.FromMilliseconds(700) };
+    private int _coverTries;
+    private string _coverKey = "";
     private IReadOnlyList<GlobalSystemMediaTransportControlsSession> _sessions = Array.Empty<GlobalSystemMediaTransportControlsSession>();
 
     /// <summary>The apps with a media session and which of them play, plus the shown one: changes when the switcher would.</summary>
@@ -75,7 +79,16 @@ public sealed class MediaService
         try { _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync(); }
         catch { return; }
         // An app turned off (or back on) in Settings: choose again.
-        Settings.Changed += () => OnUi(Select);
+        var hidden = string.Join("|", Settings.Current.HiddenApps);
+        Settings.Changed += () =>
+        {
+            // Only a change in which apps are allowed matters here (a size slider fires this many times a second).
+            var now = string.Join("|", Settings.Current.HiddenApps);
+            if (now == hidden) return;
+            hidden = now;
+            OnUi(Select);
+        };
+        _coverRetry.Tick += async (_, _) => await RetryCoverAsync();
         _settle.Tick += (_, _) => { _settle.Stop(); _ = RefreshAsync(); };
         // These events arrive on background threads; everything here runs on the UI thread.
         _manager.SessionsChanged += (_, _) => OnUi(Select);
@@ -174,6 +187,9 @@ public sealed class MediaService
                 var sameApp = _trackKey.StartsWith(session.SourceAppUserModelId + "|");
                 _trackKey = key;
                 Cover = await LoadCoverAsync(props);
+                _coverTries = 0;
+                _coverKey = key;
+                if (Cover == null && Title.Length > 0) _coverRetry.Start(); else _coverRetry.Stop();
                 if (sameApp && Title.Length > 0) TrackChanged?.Invoke();
             }
         }
@@ -192,6 +208,21 @@ public sealed class MediaService
         if (shown == _shown) { PositionChanged?.Invoke(); return; }
         _shown = shown;
         Changed?.Invoke();
+    }
+
+    private async Task RetryCoverAsync()
+    {
+        var session = _session;
+        if (session == null || _trackKey != _coverKey || Cover != null || ++_coverTries > 8) { _coverRetry.Stop(); return; }
+        try
+        {
+            var cover = await LoadCoverAsync(await session.TryGetMediaPropertiesAsync());
+            if (cover == null || session != _session || _trackKey != _coverKey) return;
+            Cover = cover;
+            _coverRetry.Stop();
+            Changed?.Invoke();
+        }
+        catch { }
     }
 
     private static async Task<BitmapSource?> LoadCoverAsync(GlobalSystemMediaTransportControlsSessionMediaProperties? props)

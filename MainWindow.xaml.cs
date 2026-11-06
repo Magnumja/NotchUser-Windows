@@ -1,3 +1,7 @@
+using System.IO.Compression;
+using Directory = System.IO.Directory;
+using File = System.IO.File;
+using SearchOption = System.IO.SearchOption;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Globalization;
@@ -31,8 +35,14 @@ public partial class MainWindow : Window
     private const double PanelW = 470, Chrome = 14, Separator = 13;
     private const double MediaH = 124, ShelfH = 78, EmptyH = 84, ToastH = 52;
     private const double ItemW = 64, ItemGap = 4;
+    private string Dock => Settings.Current.Dock is "bottom" or "left" or "right" ? Settings.Current.Dock : "top";
+    private bool Vertical => Dock is "left" or "right";
+    /// <summary>The flared notch outline only makes sense hanging from the top edge.</summary>
+    private bool IslandShape => Settings.Current.Island || Dock != "top";
+    // Island: floats this far below the screen's edge, and its content starts this much higher (no bezel to clear).
+    private const double IslandGap = 8, IslandInset = 18;
     // The window while the notch is closed: room for the widest closed pill (a lyric line, 380) as it bumps (x1.07).
-    private const double CompactW = 420, CompactH = 44;
+    private const double CompactW = 420, CompactH = 52;
 
     private readonly MediaService _media = new();
     private readonly Volume _volume = new();
@@ -104,16 +114,27 @@ public partial class MainWindow : Window
         BuildCollapsed();
         BuildExpanded();
         _lyric.Foreground = _accentBrush;
+        PillRim.Stroke = _accentBrush;
+        // The "drop": stretches along the way it moves while being carried (rotate, stretch, rotate back), and lifts a little.
+        if (NotchHost.RenderTransform is TransformGroup group)
+        {
+            group.Children.Add(_dropIn);
+            group.Children.Add(_dropStretch);
+            group.Children.Add(_dropOut);
+            group.Children.Add(_dropLift);
+            group.Children.Add(_sizeScale);
+        }
 
         NotchHost.SizeChanged += (_, _) => UpdateShape();
         NotchHost.MouseEnter += (_, _) => OnEnter();
         NotchHost.MouseLeave += (_, _) => OnLeave();
         // Small delays so passing the cursor along the top doesn't pop it open, and a brief exit doesn't snap it shut.
-        _hoverDelay.Tick += (_, _) => { _hoverDelay.Stop(); if (_inside) { _hoverOpen = true; UpdateExpanded(); } };
+        _hoverDelay.Tick += (_, _) => { _hoverDelay.Stop(); if (_inside && Settings.Current.OpenOn != "click") { _hoverOpen = true; UpdateExpanded(); } };
         _leaveDelay.Tick += (_, _) =>
         {
             _leaveDelay.Stop();
             if (_inside) return;
+            if (DateTime.UtcNow < _keyHold) { _leaveDelay.Start(); return; }  // opened from the keyboard: it stays a few seconds
             // Open, it keeps a little slack below and beside it: reaching for its bottom edge
             // (or overshooting a button) isn't leaving.
             if (_expanded && NearNotch()) { _leaveDelay.Start(); return; }
@@ -122,7 +143,7 @@ public partial class MainWindow : Window
         };
         _peekTimer.Tick += (_, _) => { _peekTimer.Stop(); _peeking = false; UpdateExpanded(); };
         _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); _toast = null; UpdateExpanded(); Refresh(); };
-        _hudTimer.Tick += (_, _) => { _hudTimer.Stop(); _hud = false; Refresh(); };
+        _hudTimer.Tick += (_, _) => { _hudTimer.Stop(); if (_moving) return; _hud = false; Refresh(); };
         _bumpBack.Tick += (_, _) =>
         {
             _bumpBack.Stop();
@@ -131,10 +152,11 @@ public partial class MainWindow : Window
         };
         _progressTick.Tick += (_, _) => UpdateProgress();
         _lyricsTick.Tick += (_, _) => UpdateLyric(animate: true);
-        _fullScreenCheck.Tick += (_, _) => CheckFullScreen();
+        _fullScreenCheck.Tick += (_, _) => { CheckFullScreen(); CheckUpdate(); if (++_topTicks % 3 == 0) KeepOnTop(); };
         _batteryCheck.Tick += (_, _) => CheckPower();
         _dragPoll.Tick += (_, _) =>
         {
+            PollMove();
             PollDrag();
             CheckHover();
             CheckKeyLocks();
@@ -154,7 +176,7 @@ public partial class MainWindow : Window
         SystemEvents.SessionSwitch += (_, e) =>
         {
             if (e.Reason is not (SessionSwitchReason.SessionLock or SessionSwitchReason.SessionUnlock)) return;
-            Dispatcher.BeginInvoke(() => { _locked = e.Reason == SessionSwitchReason.SessionLock; Refresh(); });
+            Dispatcher.BeginInvoke(() => { _locked = e.Reason == SessionSwitchReason.SessionLock; KeepOnTop(); Refresh(); });
         };
 
         // Drops: the catcher only opens the notch; the notch itself takes the drop.
@@ -163,8 +185,25 @@ public partial class MainWindow : Window
         Root.DragLeave += OnDragLeave;
         Root.Drop += OnDrop;
 
+        // Touchpad, touch or pen have no hover to wait for: a click opens the closed notch,
+        // and a middle click plays or pauses (the Mac's gestures, for a mouse).
+        NotchHost.MouseLeftButtonUp += (_, e) =>
+        {
+            if (_expanded || _hiddenForFullScreen || _moving || e.ChangedButton != MouseButton.Left) return;
+            _hoverDelay.Stop();
+            _hoverOpen = true;
+            UpdateExpanded();
+        };
+        NotchHost.MouseDown += (_, e) =>
+        {
+            if (_expanded || e.ChangedButton != MouseButton.Middle || !_media.HasMedia) return;
+            _media.PlayPause();
+            e.Handled = true;
+        };
+
         NotchHost.MouseWheel += (_, e) =>
         {
+            if (Native.KeyDown(0x11 /* VK_CONTROL */)) { StepSize(e.Delta > 0 ? 1 : -1); e.Handled = true; return; }
             if (!_volume.Available) return;
             _volume.Set(_volume.Level + e.Delta / 120f * 0.02f);
             UpdateVolume();
@@ -175,9 +214,20 @@ public partial class MainWindow : Window
         // Menus stay open until a click outside, Esc or a choice (see PollMenu): left to WPF, they
         // closed the moment another app (a game launcher) took the mouse for an instant.
         NotchHost.ContextMenu = new ContextMenu { StaysOpen = true };
-        NotchHost.ContextMenuOpening += (_, _) => { App.Trace("menu opening"); BuildMenu(); };
+        NotchHost.ContextMenuOpening += (_, e) =>
+        {
+            if (_openMenu != null) { e.Handled = true; _openMenu.IsOpen = false; return; }
+            PrepareMenu();
+        };
         NotchHost.ContextMenu.Opened += (_, _) => { _menuOpen = true; _openMenu = NotchHost.ContextMenu; App.Trace("menu opened"); };
-        NotchHost.ContextMenu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); App.Trace("menu closed"); };
+        NotchHost.ContextMenu.Closed += (_, _) =>
+        {
+            _menuOpen = false;
+            _openMenu = null;
+            _leaveDelay.Start();
+            App.Trace("menu closed");
+            if (Settings.MaxMulOverride > 0) { Settings.MaxMulOverride = 0; ApplyScaleNow(); }
+        };
 
         _media.Changed += Refresh;
         _media.TrackChanged += OnTrackChanged;
@@ -194,7 +244,12 @@ public partial class MainWindow : Window
         };
         Settings.Changed += () =>
         {
-            ApplyScale();
+            // A toggle in the menu must not re-lay-out, re-spring or re-pop the notch: only real layout changes do.
+            var layout = $"{Dock}|{Settings.Current.DockOffset}|{IslandShape}|{Settings.Current.Display}|{Settings.Current.Size}";
+            if (layout != _layoutKey) { _layoutKey = layout; ApplyDock(); }
+            var sizes = $"{Settings.Current.ClosedSize}|{Settings.Current.OpenSize}";
+            if (sizes != _sizeKey) { _sizeKey = sizes; ApplyScale(); }
+            ApplyMotionMode();
             ApplyStyle();
             ApplyLanguage();
             UpdateHotKey();
@@ -212,6 +267,9 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
+            ApplyMotionMode();
+            ApplyDock();
+            _layoutKey = $"{Dock}|{Settings.Current.DockOffset}|{IslandShape}|{Settings.Current.Display}|{Settings.Current.Size}";
             ApplyScale();
             ApplyStyle();
             ApplyLanguage();
@@ -227,6 +285,11 @@ public partial class MainWindow : Window
             UpdatePrivacy();
             _brightness.Start();
             await _media.StartAsync();
+            // For screenshots and checks: "NotchUser.exe --show-open" starts with the panel open.
+            if (Environment.GetCommandLineArgs().Contains("--show-open")) { await Task.Delay(1500); _hoverOpen = true; UpdateExpanded(); }
+            foreach (var arg in Environment.GetCommandLineArgs().Where(a => a.StartsWith("--settings")))
+                SettingsWindow.ShowPane(arg.Contains('=') ? arg[(arg.IndexOf('=') + 1)..] : "General");
+            if (Environment.GetCommandLineArgs().Contains("--show-menu")) { await Task.Delay(1500); PrepareMenu(); NotchHost.ContextMenu!.IsOpen = true; }
         };
     }
 
@@ -258,9 +321,16 @@ public partial class MainWindow : Window
     {
         double w = NotchHost.ActualWidth, h = NotchHost.ActualHeight;
         if (w <= 0 || h <= 0) { w = NotchHost.Width; h = NotchHost.Height; }
-        var shape = NotchShape.Create(w, h, TopRadius, BottomRadius);
+        Geometry shape;
+        if (IslandShape)
+        {
+            var r = Math.Min((TopRadius + BottomRadius) / 2, Math.Min(w, h) / 2);
+            shape = new RectangleGeometry(new Rect(0, 0, w, h), r, r);
+        }
+        else shape = NotchShape.Create(w, h, TopRadius, BottomRadius);
         Notch.Clip = shape;
         RimLine.Data = shape;
+        PillRim.Data = shape;
     }
 
     /// <summary>The cursor is on the open notch or just outside it (8 px to the sides, 16 below).</summary>
@@ -287,8 +357,353 @@ public partial class MainWindow : Window
     /// <summary>Top middle of the main screen (above it, off view, while something is full screen).</summary>
     private void PlaceWindow()
     {
-        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = _hiddenForFullScreen ? -Height - 100 : 0;
+        if (_anim) return;  // being carried or settling: the animation owns the position
+        var handle = new WindowInteropHelper(this).Handle;
+        if (DockedPos(handle) is { } pos)
+            SetWindowPos(handle, IntPtr.Zero, pos.X, pos.Y, 0, 0, 0x0001 | 0x0004 | 0x0010 /* NOSIZE | NOZORDER | NOACTIVATE */);
+        else
+        {
+            Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
+            Top = _hiddenForFullScreen ? -Height - 100 : 0;
+        }
+    }
+
+    /// <summary>Where the window sits (screen pixels) for the chosen screen, edge and place along it.</summary>
+    private (int X, int Y)? DockedPos(IntPtr handle, double? wDip = null, double? hDip = null)
+    {
+        var screen = Displays.Chosen(Settings.Current.Display, _screen);
+        _screen = screen;
+        if (handle == IntPtr.Zero || screen.Width == 0) return null;
+        // In real pixels, on whichever screen was chosen (each can have its own scaling).
+        var dpi = GetDpiForWindow(handle) / 96.0;
+        double wPx = (wDip ?? Width) * dpi, hPx = (hDip ?? Height) * dpi;
+        var scale = Settings.Current.LayoutScale * dpi;
+        var off = Math.Clamp(Settings.Current.DockOffset, 0, 1);
+        int x, y;
+        if (!Vertical)
+        {
+            // The open panel must fit, so the notch stays that far from the corners.
+            double half = Root.Width / 2 * scale, lo = screen.Left + half, hi = screen.Right - half;
+            var center = hi < lo ? (screen.Left + screen.Right) / 2.0 : Math.Clamp(screen.Left + off * screen.Width, lo, hi);
+            x = (int)(center - wPx / 2);
+            // Docked against the usable area: the taskbar stays clear.
+            y = Dock == "bottom" ? screen.WBottom - (int)hPx : screen.WTop;
+            if (_hiddenForFullScreen) y = Dock == "bottom" ? screen.Bottom + 100 : screen.Top - (int)hPx - 100;
+        }
+        else
+        {
+            double half = Root.Height / 2 * scale, lo = screen.Top + half, hi = screen.Bottom - half;
+            var center = hi < lo ? (screen.Top + screen.Bottom) / 2.0 : Math.Clamp(screen.Top + off * screen.Height, lo, hi);
+            y = (int)(center - hPx / 2);
+            x = Dock == "right" ? screen.WRight - (int)wPx : screen.WLeft;
+            if (_hiddenForFullScreen) x = Dock == "right" ? screen.Right + 100 : screen.Left - (int)wPx - 100;
+        }
+        return (x, y);
+    }
+
+    private Point DockOrigin() => Dock switch
+    {
+        "bottom" => new Point(0.5, 1), "left" => new Point(0, 0.5), "right" => new Point(1, 0.5), _ => new Point(0.5, 0),
+    };
+
+    /// <summary>
+    /// Lays the notch out for its edge: on top or bottom a horizontal pill that opens down or up,
+    /// on the sides a vertical one that opens sideways. Everything else follows from these few settings.
+    /// </summary>
+    private void ApplyDock()
+    {
+        var d = Dock;
+        var island = IslandShape;
+        var vertical = Vertical;
+        NotchHost.HorizontalAlignment = d switch { "left" => HorizontalAlignment.Left, "right" => HorizontalAlignment.Right, _ => HorizontalAlignment.Center };
+        NotchHost.VerticalAlignment = d switch { "bottom" => VerticalAlignment.Bottom, "left" or "right" => VerticalAlignment.Center, _ => VerticalAlignment.Top };
+        var g = island ? IslandGap : 0;
+        NotchHost.Margin = d switch { "bottom" => new Thickness(0, 0, 0, g), "left" => new Thickness(g, 0, 0, 0), "right" => new Thickness(0, 0, g, 0), _ => new Thickness(0, g, 0, 0) };
+        NotchHost.RenderTransformOrigin = _anim ? new Point(0.5, 0.5) : DockOrigin();
+        DragCatcher.HorizontalAlignment = NotchHost.HorizontalAlignment;
+        DragCatcher.VerticalAlignment = NotchHost.VerticalAlignment;
+        DragCatcher.Width = vertical ? 220 : 480;
+        DragCatcher.Height = vertical ? 230 : 220;
+        Expanded.Margin = new Thickness(0, island ? 32 - IslandInset : 32, 0, 10);
+        _hudBar.LayoutTransform = vertical ? new RotateTransform(-90) : Transform.Identity;
+
+        // The closed pill's content: left | lyric | right, or top / bottom when standing up.
+        Collapsed.ColumnDefinitions.Clear();
+        Collapsed.RowDefinitions.Clear();
+        if (!vertical)
+        {
+            Collapsed.Width = double.NaN; Collapsed.Height = NotchH;
+            Collapsed.Margin = new Thickness(13, 0, 13, 0);
+            Collapsed.HorizontalAlignment = HorizontalAlignment.Stretch; Collapsed.VerticalAlignment = VerticalAlignment.Top;
+            Collapsed.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Collapsed.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            Collapsed.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetRow(PillLeft, 0); Grid.SetColumn(PillLeft, 0);
+            Grid.SetRow(PillLyric, 0); Grid.SetColumn(PillLyric, 1);
+            Grid.SetRow(PillRight, 0); Grid.SetColumn(PillRight, 2);
+            PillLeft.HorizontalAlignment = PillRight.HorizontalAlignment = HorizontalAlignment.Stretch;
+            PrivacyDot.Margin = new Thickness(0, 11, 7, 0);
+        }
+        else
+        {
+            Collapsed.Height = double.NaN; Collapsed.Width = NotchH;
+            Collapsed.Margin = new Thickness(0, 13, 0, 13);
+            Collapsed.HorizontalAlignment = HorizontalAlignment.Left; Collapsed.VerticalAlignment = VerticalAlignment.Stretch;
+            Collapsed.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Collapsed.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            Collapsed.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(PillLeft, 0); Grid.SetRow(PillLeft, 0);
+            Grid.SetColumn(PillLyric, 0); Grid.SetRow(PillLyric, 1);
+            Grid.SetColumn(PillRight, 0); Grid.SetRow(PillRight, 2);
+            PillLeft.HorizontalAlignment = PillRight.HorizontalAlignment = HorizontalAlignment.Center;
+            PrivacyDot.Margin = new Thickness(0, 5, 5, 0);
+        }
+        PrivacyDot.VerticalAlignment = VerticalAlignment.Top;
+        PillLyric.Visibility = Visibility.Collapsed;
+
+        _target = default;
+        ApplyScale();
+    }
+
+    // MARK: - Moving the notch
+
+    private bool _moving, _moveGrab, _anim, _settling, _commitOnSettle, _frames;
+    private DateTime _moveStarted;
+    private (string Dock, double Offset, string Display) _moveBackup;
+    // The window as a body with a position, a velocity and a spring toward where it wants to be (screen pixels).
+    private double _px, _py, _vx, _vy, _tx, _ty, _gx, _gy;
+    private double _stretch, _angle;
+    private TimeSpan _lastFrame;
+    private readonly RotateTransform _dropIn = new(), _dropOut = new();
+    private readonly ScaleTransform _dropStretch = new(), _dropLift = new();
+
+    [StructLayout(LayoutKind.Sequential)] private struct WinRect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out WinRect rect);
+
+    public void BeginMoveLater() => Dispatcher.BeginInvoke(DispatcherPriority.Background, BeginMove);
+
+    /// <summary>
+    /// "Move the notch": the pill says so, and once it's grabbed it follows the mouse like a drop
+    /// of water: it stretches the way it moves, lags a hair behind, and on release falls into the
+    /// nearest edge with a bounce. Release to keep it, Esc to put it back.
+    /// </summary>
+    public void BeginMove()
+    {
+        if (_moving || _hiddenForFullScreen) return;
+        _moveBackup = (Settings.Current.Dock, Settings.Current.DockOffset, Settings.Current.Display);
+        _hoverOpen = _peeking = false;
+        UpdateExpanded();
+        _moving = true;
+        _moveGrab = _settling = false;
+        _moveStarted = DateTime.UtcNow;
+        _hudIcon.Text = "\uE7C2";
+        _hudText.Text = L("moveHint");
+        _hudKind = "move";
+        _hud = true;
+        _hudTimer.Stop();
+        _dragPoll.Interval = TimeSpan.FromMilliseconds(33);
+        Refresh();
+    }
+
+    /// <summary>The slow part: waiting for Esc, a timeout, or the press that grabs the pill. Once grabbed, the frame loop takes over.</summary>
+    private void PollMove()
+    {
+        if (!_moving || _settling) return;
+        if (Native.KeyDown(0x1B /* VK_ESCAPE */) || (!_moveGrab && DateTime.UtcNow - _moveStarted > TimeSpan.FromSeconds(25)))
+        {
+            EndMove(commit: false);
+            return;
+        }
+        if (_moveGrab || !Native.LeftButtonDown || !CursorOnNotch()) return;
+        StartDrag();
+    }
+
+    private void StartDrag()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (!GetWindowRect(handle, out var r)) return;
+        var (cx, cy) = Native.Cursor;
+        _px = r.Left; _py = r.Top; _vx = _vy = 0;
+        _tx = _px; _ty = _py;
+        _gx = cx - _px; _gy = cy - _py;   // where on the window it was grabbed
+        _stretch = 0; _angle = 0;
+        _moveGrab = _anim = true;
+        // Everything below turns around the pill's own middle.
+        NotchHost.RenderTransformOrigin = new Point(0.5, 0.5);
+        _dropLift.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1.1, 0.25, 0.5));
+        _dropLift.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1.1, 0.25, 0.5));
+        if (!_frames)
+        {
+            _frames = true;
+            _lastFrame = TimeSpan.Zero;
+            CompositionTarget.Rendering += OnFrame;
+        }
+    }
+
+    /// <summary>One step per screen refresh: follow the mouse or fall toward the edge, then shape the drop by its speed.</summary>
+    private void OnFrame(object? sender, EventArgs e)
+    {
+        var now = (e as RenderingEventArgs)?.RenderingTime ?? TimeSpan.Zero;
+        if (now == _lastFrame) return;
+        var dt = _lastFrame == TimeSpan.Zero ? 1 / 60.0 : Math.Min((now - _lastFrame).TotalSeconds, 0.05);
+        _lastFrame = now;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        if (_moveGrab)
+        {
+            var (cx, cy) = Native.Cursor;
+            if (Native.LeftButtonDown)
+            {
+                if (UpdateEdge(cx, cy))
+                {
+                    // Another edge: the pill turns (flat or upright) and keeps hanging from the mouse by its middle.
+                    ApplyDock();
+                    Refresh();
+                    var dpi = GetDpiForWindow(handle) / 96.0;
+                    _gx = Width * dpi / 2;
+                    _gy = Height * dpi / 2;
+                }
+                _tx = cx - _gx;
+                _ty = cy - _gy;
+            }
+            else
+            {
+                if (DockedPos(handle) is { } to) { _tx = to.X; _ty = to.Y; }
+                _commitOnSettle = true;
+                BeginSettle();
+            }
+        }
+
+        // A spring toward the target: stiff while carried (a slight lag), loose when falling into place (it overshoots and wobbles).
+        var (response, zeta) = _settling ? (0.5, 0.42) : (0.085, 0.8);
+        var w0 = 2 * Math.PI / response;
+        var steps = Math.Max(1, (int)Math.Ceiling(dt / 0.004));
+        var h = dt / steps;
+        for (var n = 0; n < steps; n++)
+        {
+            _vx += (w0 * w0 * (_tx - _px) - 2 * zeta * w0 * _vx) * h;
+            _vy += (w0 * w0 * (_ty - _py) - 2 * zeta * w0 * _vy) * h;
+            _px += _vx * h;
+            _py += _vy * h;
+        }
+        SetWindowPos(handle, IntPtr.Zero, (int)Math.Round(_px), (int)Math.Round(_py), 0, 0, 0x0001 | 0x0004 | 0x0010);
+
+        // The drop: longer along its way, thinner across, easing back when it slows.
+        var speed = Math.Sqrt(_vx * _vx + _vy * _vy);
+        _stretch += (Math.Clamp(speed / 3200, 0, 0.32) - _stretch) * Math.Min(1, dt * 14);
+        if (speed > 120)
+        {
+            var heading = Math.Atan2(_vy, _vx) * 180 / Math.PI;
+            _angle += (((heading - _angle + 540) % 360) - 180) * Math.Min(1, dt * 20);
+        }
+        _dropIn.Angle = -_angle;
+        _dropOut.Angle = _angle;
+        _dropStretch.ScaleX = 1 + _stretch;
+        _dropStretch.ScaleY = 1 / Math.Sqrt(1 + _stretch);
+
+        if (_settling && speed < 8 && Math.Abs(_tx - _px) < 0.6 && Math.Abs(_ty - _py) < 0.6) FinishMove();
+    }
+
+    /// <summary>Let go: the drop falls toward its place and the lift relaxes.</summary>
+    private void BeginSettle()
+    {
+        _moveGrab = false;
+        _settling = true;
+        _dropLift.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.35, 0.5));
+        _dropLift.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.35, 0.5));
+    }
+
+    private void FinishMove()
+    {
+        if (_frames) { _frames = false; CompositionTarget.Rendering -= OnFrame; }
+        _anim = _settling = _moving = _moveGrab = false;
+        _hud = false;
+        _dropIn.Angle = _dropOut.Angle = 0;
+        _dropStretch.ScaleX = _dropStretch.ScaleY = 1;
+        _dropLift.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        _dropLift.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        _dropLift.ScaleX = _dropLift.ScaleY = 1;
+        _stretch = 0;
+        NotchHost.RenderTransformOrigin = DockOrigin();
+        if (_commitOnSettle) Settings.Current.Save();   // the save lays it out and places it for good
+        else PlaceWindow();
+        Bump();
+        Refresh();
+    }
+
+    /// <summary>The edge nearest the mouse (with a margin of habit so it doesn't flicker at a corner) and how far along it.</summary>
+    private bool UpdateEdge(int x, int y)
+    {
+        if (Displays.At(x, y) is not { } s) return false;
+        var distance = new Dictionary<string, double>
+        {
+            ["top"] = y - s.Top, ["bottom"] = s.Bottom - 1 - y, ["left"] = x - s.Left, ["right"] = s.Right - 1 - x,
+        };
+        var nearest = distance.MinBy(k => k.Value).Key;
+        var sameScreen = _screen?.Id == s.Id;
+        var edge = !sameScreen || nearest == Dock || distance[nearest] < distance[Dock] - 40 ? nearest : Dock;
+        var changed = edge != Dock || !sameScreen;
+        var along = edge is "top" or "bottom" ? (x - s.Left) / (double)s.Width : (y - s.Top) / (double)s.Height;
+        var current = Settings.Current;
+        current.Dock = edge;
+        current.DockOffset = Math.Clamp(along, 0, 1);
+        current.Display = s.Primary ? "primary" : s.Id;
+        _screen = s;
+        return changed;
+    }
+
+    /// <summary>Esc (or a timeout): everything goes back to where it was, falling there if it was already carried.</summary>
+    private void EndMove(bool commit)
+    {
+        (Settings.Current.Dock, Settings.Current.DockOffset, Settings.Current.Display) = _moveBackup;
+        _screen = null;
+        _commitOnSettle = commit;
+        ApplyDock();
+        if (_anim)
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            if (DockedPos(handle) is { } to) { _tx = to.X; _ty = to.Y; }
+            BeginSettle();
+        }
+        else FinishMove();
+    }
+
+    public void ResetPosition()
+    {
+        Settings.Current.Dock = "top";
+        Settings.Current.DockOffset = 0.5;
+        Settings.Current.Display = "primary";
+        _screen = null;
+        Settings.Current.Save();
+    }
+
+    private Displays.Screen? _screen;
+    private DateTime _snoozeUntil = DateTime.MinValue;
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    /// <summary>Opened again from the Start menu or a shortcut: come back from "hide for…".</summary>
+    public void Wake()
+    {
+        _snoozeUntil = DateTime.MinValue;
+        CheckFullScreen();
+    }
+
+    private void Snooze(TimeSpan span)
+    {
+        _snoozeUntil = DateTime.UtcNow + span;
+        CheckFullScreen();
+    }
+
+    /// <summary>With nothing to show the pill can fade out until the mouse comes to the top.</summary>
+    private void UpdateIdle()
+    {
+        var idle = Settings.Current.HideWhenIdle && !Settings.Current.ClockInPill && !_expanded && !_inside && !_hud
+                   && _toast == null && !_dragging && !_media.HasMedia && _shelf.Items.Count == 0
+                   && PrivacyDot.Visibility != Visibility.Visible;
+        if (NotchHost.Tag as bool? == idle) return;
+        NotchHost.Tag = idle;
+        Motion.Fade(NotchHost, idle ? 0 : 1, idle ? 0.5 : 0.15);
     }
 
     /// <summary>
@@ -299,14 +714,33 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyScale()
     {
-        var scale = Settings.Current.Scale;
+        var scale = Settings.Current.LayoutScale;
         if (Root.LayoutTransform is not ScaleTransform current || current.ScaleX != scale)
             Root.LayoutTransform = new ScaleTransform(scale, scale);
-        var (w, h) = _compact ? (CompactW, CompactH) : (Root.Width, Root.Height);
+        UpdateSizeScale(animate: true);
+        var (w, h) = _compact ? (Vertical ? (CompactH, CompactW) : (CompactW, CompactH)) : (Root.Width, Root.Height);
         Root.HorizontalAlignment = HorizontalAlignment.Left;
-        Root.Margin = new Thickness(-(Root.Width - w) / 2 * scale, 0, 0, 0);
-        Width = w * scale;
-        Height = h * scale;
+        Root.VerticalAlignment = VerticalAlignment.Top;
+        // The layout is always the full-size one; the (smaller) window shows the part around the notch.
+        var mx = Dock switch { "left" => 0, "right" => -(Root.Width - w), _ => -(Root.Width - w) / 2 };
+        var my = Dock switch { "bottom" => -(Root.Height - h), "left" or "right" => -(Root.Height - h) / 2, _ => 0 };
+        Root.Margin = new Thickness(mx * scale, my * scale, 0, 0);
+        if (_anim) { Width = w * scale; Height = h * scale; return; }
+        ApplyRect(w * scale, h * scale);
+    }
+
+    /// <summary>New size and place in a single step, so no frame is drawn with one and not the other.</summary>
+    private void ApplyRect(double wDip, double hDip)
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero && DockedPos(handle, wDip, hDip) is { } pos)
+        {
+            var dpi = GetDpiForWindow(handle) / 96.0;
+            SetWindowPos(handle, IntPtr.Zero, pos.X, pos.Y, (int)Math.Round(wDip * dpi), (int)Math.Round(hDip * dpi), 0x0004 | 0x0010 /* NOZORDER | NOACTIVATE */);
+            return;
+        }
+        Width = wDip;
+        Height = hDip;
         PlaceWindow();
     }
 
@@ -316,6 +750,8 @@ public partial class MainWindow : Window
     /// <summary>Full size right away when needed; back to compact once the closing spring has settled.</summary>
     private void UpdateCompact()
     {
+        // A menu is anchored to this window: it must not shrink, grow or collect garbage under it.
+        if (_menuOpen) { _compactDelay.Stop(); return; }
         if (NeedsFullWindow())
         {
             _compactDelay.Stop();
@@ -336,6 +772,21 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, App.TrimMemory);
         }
     }
+
+    private int _topTicks;
+
+    /// <summary>
+    /// Another always-on-top window (Start, a launcher, a recorder) can end up above the notch
+    /// and hide it for good: take the top of that group back, without taking focus.
+    /// </summary>
+    private void KeepOnTop()
+    {
+        if (_hiddenForFullScreen || _locked || _menuOpen || _moving) return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+            SetWindowPos(handle, new IntPtr(-1) /* HWND_TOPMOST */, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010 /* NOMOVE | NOSIZE | NOACTIVATE */);
+    }
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
     private const int GWL_EXSTYLE = -20, WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x80;
     [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int index);
@@ -371,7 +822,7 @@ public partial class MainWindow : Window
         if (hud)
         {
             left = _hudIcon;
-            right = _hudKind == "text" ? _hudText : _hudBar;
+            right = _hudKind is "text" or "move" ? (Vertical && _hudKind == "move" ? _pillEmptyRight : _hudText) : _hudBar;
         }
         else if (hasMedia)
         {
@@ -449,6 +900,22 @@ public partial class MainWindow : Window
     private readonly TextBlock _emptyTitle = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = White(0.55), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _emptyHint = new() { FontSize = 11, Foreground = White(0.35), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) };
 
+    private UIElement[] _mediaRows = Array.Empty<UIElement>();
+
+    /// <summary>The panel's rows rise into place one after another, after the panel itself has started to open.</summary>
+    private void StaggerContent()
+    {
+        var rows = _mediaRows.Concat(new UIElement[] { _hairline, _shelfSection }).Where(r => r.Visibility == Visibility.Visible).ToList();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var move = new TranslateTransform(0, 9);
+            rows[i].RenderTransform = move;
+            var delay = 0.06 + i * 0.045;
+            move.BeginAnimation(TranslateTransform.YProperty, SpringEase.To(0, 0.38, 0.78, delay, 9));
+            rows[i].BeginAnimation(OpacityProperty, Motion.Ease(1, 0.22, delay, 0));
+        }
+    }
+
     private void BuildExpanded()
     {
         // Toast
@@ -470,6 +937,10 @@ public partial class MainWindow : Window
         _cover.BorderBrush = White(0.1);
         _cover.BorderThickness = new Thickness(0.5);
         _cover.Child = Icons.Glyph("\uEC4F", 18, White(0.5));
+        // A soft shadow under the cover, made of translucent rings (a blur would redraw with every animation).
+        foreach (var (margin, alpha) in new[] { (new Thickness(-5, -2, -5, -9), (byte)0x14), (new Thickness(-3, -1, -3, -6), (byte)0x1E), (new Thickness(-1.5, 0, -1.5, -3), (byte)0x2A) })
+            _coverShadow.Children.Add(new Border { Margin = margin, CornerRadius = new CornerRadius(56 * 0.22 + 4), Background = new SolidColorBrush(Color.FromArgb(alpha, 0, 0, 0)) });
+        _coverBox.Children.Add(_coverShadow);
         _coverBox.Children.Add(_cover);
         _coverBox.Children.Add(_coverGlint);
         _coverBox.RenderTransformOrigin = new Point(0.5, 0.5);
@@ -561,6 +1032,7 @@ public partial class MainWindow : Window
         controlsRow.Children.Add(_controls);
         controlsRow.Children.Add(_sources);
 
+        _mediaRows = new UIElement[] { top, progress, controlsRow };
         var media = new StackPanel();
         media.Children.Add(top);
         media.Children.Add(progress);
@@ -626,8 +1098,8 @@ public partial class MainWindow : Window
         var showMedia = hasMedia && !_dragging;
         var toast = _toast != null;
         var hud = _hud && !_expanded && !toast;
-        var lyric = LyricShown() && !_expanded && !hud;
-        var clock = Settings.Current.ClockInPill && !extended && !hud && !_expanded;
+        var lyric = LyricShown() && !_expanded && !hud && !Vertical;
+        var clock = Settings.Current.ClockInPill && !extended && !hud && !_expanded && !Vertical;
 
         // Collapsed
         UpdateCollapsed(hasMedia, hud);
@@ -693,6 +1165,7 @@ public partial class MainWindow : Window
         _pillWave.Playing = pillOn && glassStyle;
         _bigBars.Playing = bigOn && !glassStyle;
         _bigWave.Playing = bigOn && glassStyle;
+        UpdatePillRim(running);
         UpdateLyricsSource();
         if (_lyrics.Count > 0 && _media.Playing && running) _lyricsTick.Start(); else _lyricsTick.Stop();
         if (_expanded && _media.Playing && running) _progressTick.Start(); else _progressTick.Stop();
@@ -711,11 +1184,15 @@ public partial class MainWindow : Window
                 if (list.Count == 0) list.Add(EmptyH);
                 sections = list.Sum() + Separator * (list.Count - 1);
             }
-            size = new Size(PanelW, NotchH + Chrome + sections);
+            size = new Size(PanelW, NotchH + Chrome + sections - (IslandShape ? IslandInset : 0));
         }
-        else if (hud) size = new Size(NotchW + Side * 2 + 34, NotchH);
+        else if (hud) size = Vertical ? new Size(NotchH, NotchW + Side * 2 + 34) : new Size(NotchW + Side * 2 + 34, NotchH);
         else if (lyric) size = new Size(380, NotchH);
-        else size = new Size(NotchW + (extended ? Side * 2 : 0), NotchH);
+        else
+        {
+            var length = NotchW + (extended ? Side * 2 : 0);
+            size = Vertical ? new Size(NotchH, length) : new Size(length, NotchH);
+        }
 
         if (size != _target)
         {
@@ -742,11 +1219,13 @@ public partial class MainWindow : Window
             }
         }
         UpdateCompact();
+        UpdateIdle();
     }
 
     /// <summary>Opens or closes from everything that wants it open (Mac: NotchController.tick).</summary>
     private void UpdateExpanded()
     {
+        if (_moving && !_expanded) return;
         if (_menuOpen) { App.Trace("UpdateExpanded skipped: menu open"); return; }  // the mouse is on the menu, not the notch: hold still
         var want = _hoverOpen || _dragging || _toast != null || (_peeking && _media.HasMedia);
         if (_hiddenForFullScreen) want = false;
@@ -758,6 +1237,8 @@ public partial class MainWindow : Window
         if (_expanded == expanded) return;
         App.Trace($"SetExpanded {expanded} (hover={_hoverOpen} drag={_dragging} toast={_toast != null} peek={_peeking})");
         _expanded = expanded;
+        UpdatePillSheen();
+        UpdateSizeScale(animate: true);
         if (expanded)
         {
             _hud = false;
@@ -766,15 +1247,20 @@ public partial class MainWindow : Window
         UpdateLift();
 
         // The outline: corners flare and round more when open (Mac: 6/10 → 12/32).
-        BeginAnimation(TopRadiusProperty, SpringEase.To(expanded ? 12 : 6, 0.42, 0.76));
-        BeginAnimation(BottomRadiusProperty, SpringEase.To(expanded ? 32 : 10, 0.42, 0.76));
+        var island = IslandShape;
+        BeginAnimation(TopRadiusProperty, SpringEase.To(island ? (expanded ? 26 : 14) : expanded ? 12 : 6, 0.42, 0.76));
+        BeginAnimation(BottomRadiusProperty, SpringEase.To(island ? (expanded ? 26 : 14) : expanded ? 32 : 10, 0.42, 0.76));
         Motion.Fade(Backdrop, expanded ? 1 : 0, expanded ? 0.3 : 0.25);
-        Motion.Fade(CollapsedBlack, expanded ? 0 : 1, expanded ? 0.3 : 0.25);
+        // CollapsedBlack (now below the backdrop) stays fully opaque, so the pill never goes see-through
+        // mid-fade (that was the blink). Only Glass lets it go, late on the way in and early on the way out.
+        if (Settings.Current.Glass) Motion.Fade(CollapsedBlack, expanded ? 0 : 1, expanded ? 0.2 : 0.12, expanded ? 0.15 : 0);
+        else { CollapsedBlack.BeginAnimation(OpacityProperty, null); CollapsedBlack.Opacity = 1; }
         Motion.Fade(RimLine, expanded ? 1 : 0, 0.3);
 
         if (expanded) ShowExpandedContent(); else HideExpandedContent();
         UpdatePrivacy();
         Refresh();
+        if (expanded) StaggerContent();
     }
 
     /// <summary>
@@ -792,12 +1278,12 @@ public partial class MainWindow : Window
             const double r = 0.45, d = 0.82, delay = 0.04;
             scale.ScaleX = scale.ScaleY = 0.92;
             move.Y = -8;
-            var blur = new BlurEffect { Radius = 10, RenderingBias = RenderingBias.Performance };
-            Expanded.Effect = blur;
-            var unblur = SpringEase.To(0, r, d, delay);
-            unblur.Completed += (_, _) => { if (Expanded.Effect == blur) Expanded.Effect = null; };
-            blur.BeginAnimation(BlurEffect.RadiusProperty, unblur);
-            Expanded.BeginAnimation(OpacityProperty, SpringEase.To(1, r, d, delay));
+            // No blur (it is drawn by the processor, every frame): the panel is drawn once into a texture while it settles.
+            Expanded.Effect = null;
+            Expanded.CacheMode = new BitmapCache(VisualTreeHelper.GetDpi(this).DpiScaleX * Settings.Current.LayoutScale * Settings.Current.StateFactor(true));
+            var appearLifted = SpringEase.To(1, r, d, delay);
+            appearLifted.Completed += (_, _) => Expanded.CacheMode = null;
+            Expanded.BeginAnimation(OpacityProperty, appearLifted);
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, r, d, delay));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, r, d, delay));
             move.BeginAnimation(TranslateTransform.YProperty, SpringEase.To(0, r, d, delay));
@@ -810,7 +1296,7 @@ public partial class MainWindow : Window
             scale.ScaleX = scale.ScaleY = 0.9;
             // While it grows in, the content is drawn once into a texture and only scaled, instead
             // of laying out and drawing every text again on each frame.
-            var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX * Settings.Current.Scale;
+            var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX * Settings.Current.LayoutScale * Settings.Current.StateFactor(true);
             Expanded.CacheMode = new BitmapCache(dpi);
             var appear = SpringEase.To(1, 0.4, 0.8, 0.05);
             appear.Completed += (_, _) => Expanded.CacheMode = null;
@@ -828,6 +1314,40 @@ public partial class MainWindow : Window
         Expanded.BeginAnimation(OpacityProperty, fade);
     }
 
+    private string _rimKey = "";
+
+    /// <summary>
+    /// The closed pill gets a thin rim in the album's color that breathes while music plays (a
+    /// faint white one otherwise), so it reads on dark wallpapers too. Slow, 30 fps, only while visible.
+    /// </summary>
+    private void UpdatePillRim(bool running)
+    {
+        var state = _expanded || _hiddenForFullScreen ? "off" : _media.HasMedia ? (_media.Playing && running ? "breathe" : "steady") : "faint";
+        if (state == _rimKey) return;
+        _rimKey = state;
+        switch (state)
+        {
+            case "breathe":
+                var arrive = Motion.Ease(0.25, 0.5, delay: 0.25);
+                arrive.Completed += (_, _) =>
+                {
+                    if (_rimKey != "breathe") return;
+                    var a = new DoubleAnimation(0.25, 0.8, TimeSpan.FromSeconds(1.6))
+                    {
+                        AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever,
+                        EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                    };
+                    Timeline.SetDesiredFrameRate(a, 30);
+                    PillRim.BeginAnimation(OpacityProperty, a);
+                };
+                PillRim.BeginAnimation(OpacityProperty, arrive);
+                break;
+            default:
+                PillRim.BeginAnimation(OpacityProperty, Motion.Ease(state == "off" ? 0 : state == "steady" ? 0.5 : 0.22, 0.35));
+                break;
+        }
+    }
+
     /// <summary>Elevated and Glass: the closed notch rises a little under the mouse before it opens.</summary>
     private void UpdateLift()
     {
@@ -842,21 +1362,105 @@ public partial class MainWindow : Window
     /// <summary>The album's color rises from the bottom of the open notch while there's music (none without).</summary>
     private void UpdateShadows(bool showMedia)
     {
-        var on = showMedia ? 0.55 : 0;
+        var on = showMedia ? _glowLevel : 0;
         if (AccentGlow.Tag as double? == on) return;
         AccentGlow.Tag = on;
         AccentGlow.BeginAnimation(OpacityProperty, Motion.Ease(on, 0.4));
     }
 
     /// <summary>The look of each style (Settings → Appearance, or right-click the notch).</summary>
+    private string _layoutKey = "", _styleKey = "", _langKey = "", _sizeKey = "";
+    // The closed and the open size: the notch is drawn at the factor for its state, springing between the two.
+    private readonly ScaleTransform _sizeScale = new(1, 1);
+
+    /// <summary>Everything that happens the moment a menu is asked for.</summary>
+    private void PrepareMenu()
+    {
+        App.Trace("menu opening");
+        BuildMenu();
+        LockForMenu();
+        PlaceMenu(NotchHost.ContextMenu!);
+    }
+
+    private bool _instantSize;
+
+    /// <summary>Re-lays out at once (no spring): for changes that must not be seen, like pinning the layout size for the menu.</summary>
+    private void ApplyScaleNow()
+    {
+        _instantSize = true;
+        ApplyScale();
+        _instantSize = false;
+        Root.UpdateLayout();
+    }
+
+    private void UpdateSizeScale(bool animate)
+    {
+        animate &= !_instantSize;
+        var f = Settings.Current.StateFactor(_expanded);
+        if (Math.Abs(_sizeScale.ScaleX - f) < 0.0005 && !_sizeScale.HasAnimatedProperties) return;
+        if (!animate)
+        {
+            _sizeScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            _sizeScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            _sizeScale.ScaleX = _sizeScale.ScaleY = f;
+            return;
+        }
+        _sizeScale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(f, 0.42, 0.78));
+        _sizeScale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(f, 0.42, 0.78));
+    }
+
+    /// <summary>Ctrl + wheel: one step along the preset sizes, for the closed or the open notch, whichever is showing.</summary>
+    private void StepSize(int direction)
+    {
+        var s = Settings.Current;
+        var current = _expanded ? s.OpenSize : s.ClosedSize;
+        var steps = Settings.SizeSteps;
+        var index = Array.IndexOf(steps, steps.OrderBy(v => Math.Abs(v - current)).First());
+        var next = steps[Math.Clamp(index + direction, 0, steps.Length - 1)];
+        if (_expanded) s.OpenSize = next; else s.ClosedSize = next;
+        s.Save();
+    }
+    private double _glowLevel = 0.55;
+
+    private void UpdatePillSheen()
+    {
+        var look = Settings.Current.Style;
+        var on = !_expanded && look != "basic" ? (look == "glass" ? 0.9 : 0.6) : 0;
+        Motion.Fade(PillSheen, on, on > 0 ? 0.3 : 0.15);
+    }
+    private readonly Grid _coverShadow = new() { IsHitTestVisible = false, Visibility = Visibility.Collapsed };
+
+    /// <summary>Calm waits a little longer before opening and closing, Lively hardly waits at all.</summary>
+    private void ApplyMotionMode()
+    {
+        var (open, leave) = Settings.Current.Motion switch { "calm" => (150, 300), "lively" => (85, 200), _ => (120, 250) };
+        _hoverDelay.Interval = TimeSpan.FromMilliseconds(open);
+        _leaveDelay.Interval = TimeSpan.FromMilliseconds(leave);
+    }
+
     private void ApplyStyle()
     {
+        var styleKey = $"{Settings.Current.Indicator}|{IslandShape}|{Settings.Current.Style}";
+        if (styleKey == _styleKey) return;
+        _styleKey = styleKey;
+        var island = IslandShape;
+        BeginAnimation(TopRadiusProperty, SpringEase.To(island ? (_expanded ? 26 : 14) : _expanded ? 12 : 6, 0.3, 0.9));
+        BeginAnimation(BottomRadiusProperty, SpringEase.To(island ? (_expanded ? 26 : 14) : _expanded ? 32 : 10, 0.3, 0.9));
+        _target = default;
         var style = Settings.Current.Style;
         var glass = style == "glass";
         var elevated = style == "elevated";
         // No real backdrop blur on a layered window: Glass is a more see-through surface instead.
-        RimMid.Color = Color.FromArgb((byte)((glass ? 0.16 : 0.10) * 255), 255, 255, 255);
-        RimEnd.Color = Color.FromArgb((byte)((glass ? 0.45 : 0.28) * 255), 255, 255, 255);
+        RimMid.Color = Color.FromArgb((byte)((glass ? 0.20 : elevated ? 0.16 : 0.10) * 255), 255, 255, 255);
+        RimEnd.Color = Color.FromArgb((byte)((glass ? 0.50 : elevated ? 0.36 : 0.28) * 255), 255, 255, 255);
+        // Basic is pure black; Elevated adds a reflection and a stronger glow; Glass lets the desktop show a little through.
+        BackdropBlack.Opacity = glass ? 0.87 : 1;
+        Sheen.Opacity = glass ? 1 : elevated ? 0.55 : 0;
+        _glowLevel = elevated ? 0.85 : glass ? 0.6 : 0.55;
+        CollapsedBlack.BeginAnimation(OpacityProperty, null);
+        CollapsedBlack.Opacity = glass && _expanded ? 0 : 1;
+        _coverShadow.Visibility = style == "basic" ? Visibility.Collapsed : Visibility.Visible;
+        UpdatePillSheen();
 
         _bigIndicator.Children.Clear();
         _bigIndicator.Children.Add(Settings.Current.Wave ? _bigWave : _bigBars);
@@ -867,7 +1471,7 @@ public partial class MainWindow : Window
         Surface(_controls, style, fallback: 0, elevated: 0.05);
         Surface(_shelfWell, style, fallback: 0.05, elevated: 0.05);
         _controls.Padding = new Thickness(style == "basic" ? 0 : 6, 0, style == "basic" ? 0 : 6, 0);
-        _texts.Effect = glass ? new DropShadowEffect { Color = Colors.Black, Opacity = 0.45, BlurRadius = 4, ShadowDepth = 1, Direction = 270 } : null;
+        _texts.Effect = null;
         _shownPlaying = null;
         AccentGlow.Tag = null;
         UpdateCollapsed(_media.HasMedia, _hud && !_expanded);
@@ -888,7 +1492,7 @@ public partial class MainWindow : Window
                     Color.FromArgb((byte)(elevated * 0.6 * 255), 255, 255, 255), 90));
                 b.BorderBrush = Frozen(new LinearGradientBrush(Color.FromArgb(0x2E, 255, 255, 255), Color.FromArgb(0x08, 255, 255, 255), 90));
                 b.BorderThickness = new Thickness(0.6);
-                b.Effect = new DropShadowEffect { Color = Colors.Black, Opacity = 0.3, BlurRadius = 12, ShadowDepth = 3, Direction = 270 };
+                b.Effect = null;
                 break;
             default:
                 b.Background = White(fallback);
@@ -901,6 +1505,8 @@ public partial class MainWindow : Window
 
     private void ApplyLanguage()
     {
+        if (_langKey == Resolved) return;
+        _langKey = Resolved;
         _shelfKey = null;
         _sourcesKey = null;
         _trash.ToolTip = L("clearShelf");
@@ -915,10 +1521,16 @@ public partial class MainWindow : Window
 
     // MARK: - Cover and album color
 
+    private string _shownFallback = "";
+
     private void SetCover(BitmapSource? cover)
     {
-        if (ReferenceEquals(cover, _shownCover)) return;
+        // No thumbnail (yet, or ever): the player's own icon stands in, never an empty square.
+        var fallbackId = cover == null ? _media.SourceId : "";
+        if (ReferenceEquals(cover, _shownCover) && fallbackId == _shownFallback) return;
         _shownCover = cover;
+        _shownFallback = fallbackId;
+        var image = cover ?? (fallbackId.Length > 0 ? ShellImage.App(fallbackId) : null);
         var accent = cover == null ? Colors.White : AlbumColor(cover);
         if (accent != _accent)
         {
@@ -932,10 +1544,10 @@ public partial class MainWindow : Window
             _bigBars.SetGlow(Settings.Current.Style == "elevated", accent);
         }
 
-        Brush brush = cover == null ? White(0.1) : Frozen(new ImageBrush(cover) { Stretch = Stretch.UniformToFill });
+        Brush brush = image == null ? White(0.1) : Frozen(new ImageBrush(image) { Stretch = Stretch.UniformToFill });
         _pillCover.Background = brush;
         _cover.Background = brush;
-        _cover.Child = cover == null ? Icons.Glyph("\uEC4F", 18, White(0.5)) : null;
+        _cover.Child = image == null ? Icons.Glyph("\uEC4F", 18, White(0.5)) : null;
         // The new cover fades in over the old one (Mac: 0.3 s).
         foreach (var e in new UIElement[] { _cover, _pillCover }) e.BeginAnimation(OpacityProperty, Motion.Ease(1, 0.3, from: 0.3));
     }
@@ -1042,7 +1654,7 @@ public partial class MainWindow : Window
     private void ThickTrack(bool thick)
     {
         foreach (var b in new[] { _trackBg, _trackFill }) Motion.Spring(b, HeightProperty, thick ? 7 : 4, 0.25, 0.8);
-        _trackFill.Background = White(thick ? 0.95 : 0.7);
+        _trackFill.Background = thick ? _accentBrush : White(0.7);
     }
 
     private void PreviewSeek(double x)
@@ -1113,7 +1725,7 @@ public partial class MainWindow : Window
     /// <summary>A level (volume, brightness) or a short state ("Caps Lock on") in the closed pill.</summary>
     private void ShowHud(string kind = "volume")
     {
-        if (_toast != null || _hiddenForFullScreen) return;
+        if (_toast != null || _hiddenForFullScreen || _moving || (Vertical && kind == "text")) return;
         _hudKind = kind;
         _hud = true;
         _hudTimer.Stop();
@@ -1207,8 +1819,9 @@ public partial class MainWindow : Window
     /// <summary>Quick squash-and-stretch, like the island reacting to something new (Mac: 1.07 × 1.16, response 0.22, damping 0.32).</summary>
     private void Bump()
     {
-        Motion.Spring(BumpScale, ScaleTransform.ScaleXProperty, 1.07, 0.22, 0.32);
-        Motion.Spring(BumpScale, ScaleTransform.ScaleYProperty, 1.16, 0.22, 0.32);
+        var (bx, by) = Settings.Current.Motion switch { "calm" => (1.04, 1.09), "lively" => (1.1, 1.23), _ => (1.07, 1.16) };
+        Motion.Spring(BumpScale, ScaleTransform.ScaleXProperty, bx, 0.22, 0.32);
+        Motion.Spring(BumpScale, ScaleTransform.ScaleYProperty, by, 0.22, 0.32);
         _bumpBack.Stop();
         _bumpBack.Start();
     }
@@ -1234,35 +1847,71 @@ public partial class MainWindow : Window
         Bump();
         UpdateExpanded();
         Refresh();
+        // The icon pops in with a bounce.
+        _toastIcon.RenderTransformOrigin = new Point(0.5, 0.5);
+        var pop = _toastIcon.RenderTransform as ScaleTransform ?? new ScaleTransform();
+        _toastIcon.RenderTransform = pop;
+        pop.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.4, 0.4, 0.08, 0.3));
+        pop.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.4, 0.4, 0.08, 0.3));
     }
 
     // MARK: - Copy text from the screen (Ctrl+Shift+2)
 
     private const int WM_HOTKEY = 0x0312, HotKeyId = 1;
     private const uint MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_NOREPEAT = 0x4000, VK_2 = 0x32;
-    private bool _hotKeyOn;
+    private readonly bool[] _keyOn = new bool[4], _keyTried = new bool[4];
+    private DateTime _keyHold = DateTime.MinValue;
+    private const uint MOD_ALT = 0x1;
 
     private void UpdateHotKey()
     {
         var handle = new WindowInteropHelper(this).Handle;
         if (handle == IntPtr.Zero) return;
-        var want = Settings.Current.OcrEnabled;
-        if (want == _hotKeyOn) return;
-        if (want)
+        var s = Settings.Current;
+        void Sync(int id, bool want, uint modifiers, uint key, string label)
         {
-            _hotKeyOn = RegisterHotKey(handle, HotKeyId, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_2);
-            if (!_hotKeyOn) ShowToast("\uE7BA", L("shortcutTaken"), "", ok: false);
+            if (!want) { if (_keyOn[id]) UnregisterHotKey(handle, id); _keyOn[id] = _keyTried[id] = false; return; }
+            if (_keyTried[id]) return;  // tried once: a taken shortcut is reported once, not at every setting
+            _keyTried[id] = true;
+            _keyOn[id] = RegisterHotKey(handle, id, modifiers | MOD_NOREPEAT, key);
+            if (!_keyOn[id]) ShowToast("\uE7BA", string.Format(L("shortcutTakenN"), label), "", ok: false);
+        }
+        Sync(HotKeyId, s.OcrEnabled, MOD_CONTROL | MOD_SHIFT, VK_2, "Ctrl+Shift+2");
+        Sync(2, s.ToggleHotkey, MOD_CONTROL | MOD_ALT, 0x4E /* N */, "Ctrl+Alt+N");
+        Sync(3, s.MicHotkey, MOD_CONTROL | MOD_ALT, 0x4D /* M */, "Ctrl+Alt+M");
+    }
+
+    /// <summary>Ctrl+Alt+N: opens the notch for a few seconds (or until the mouse has been on it and left), or closes it.</summary>
+    private void ToggleByKey()
+    {
+        if (_hiddenForFullScreen || _moving) return;
+        if (_expanded)
+        {
+            _keyHold = DateTime.MinValue;
+            _hoverOpen = _peeking = false;
+            UpdateExpanded();
         }
         else
         {
-            UnregisterHotKey(handle, HotKeyId);
-            _hotKeyOn = false;
+            _keyHold = DateTime.UtcNow.AddSeconds(5);
+            _hoverOpen = true;
+            UpdateExpanded();
+            _leaveDelay.Start();
         }
+    }
+
+    private void ToggleMicByKey()
+    {
+        var muted = Volume.ToggleMicrophone();
+        if (muted == null) ShowToast("\uF781", L("micNone"), "", ok: false);
+        else ShowToast(muted.Value ? "\uF781" : "\uE720", L(muted.Value ? "micMuted" : "micOn"), "", ok: !muted.Value);
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg == WM_HOTKEY && wParam.ToInt32() == HotKeyId)
+        if (msg == WM_HOTKEY && wParam.ToInt32() == 2) { Dispatcher.BeginInvoke(ToggleByKey); handled = true; }
+        else if (msg == WM_HOTKEY && wParam.ToInt32() == 3) { Dispatcher.BeginInvoke(ToggleMicByKey); handled = true; }
+        else if (msg == WM_HOTKEY && wParam.ToInt32() == HotKeyId)
         {
             // Leave the window procedure before opening the selection overlay.
             Dispatcher.BeginInvoke(CopyTextFromScreen);
@@ -1325,7 +1974,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void CheckFullScreen()
     {
-        var hide = FullScreen.IsActive(new WindowInteropHelper(this).Handle) && !_dragging;
+        var hide = (FullScreen.IsActive(new WindowInteropHelper(this).Handle) && !_dragging) || DateTime.UtcNow < _snoozeUntil;
         if (hide == _hiddenForFullScreen) return;
         _hiddenForFullScreen = hide;
         if (hide)
@@ -1343,6 +1992,7 @@ public partial class MainWindow : Window
             _dragPoll.Start();
             _privacyCheck.Start();
             NotchHost.Visibility = Visibility.Visible;
+            NotchHost.Tag = null;
             NotchHost.BeginAnimation(OpacityProperty, Motion.Ease(1, 0.25, from: 0));
         }
         Power.Quiet(hide);
@@ -1447,8 +2097,22 @@ public partial class MainWindow : Window
         close.MouseLeftButtonUp += (_, e) => { e.Handled = true; RemoveFromShelf(new[] { entry }); };
         root.Children.Add(close);
 
-        root.MouseEnter += (_, _) => { close.Visibility = Visibility.Visible; if (!selected) bg.Background = White(0.1); };
-        root.MouseLeave += (_, _) => { close.Visibility = Visibility.Collapsed; if (!selected) bg.Background = White(0); };
+        root.MouseEnter += (_, _) =>
+        {
+            close.Visibility = Visibility.Visible;
+            if (!selected) bg.Background = White(0.1);
+            var (lift, _) = Motion.Transforms(root);
+            Motion.Spring(lift, ScaleTransform.ScaleXProperty, 1.07, 0.28, 0.6);
+            Motion.Spring(lift, ScaleTransform.ScaleYProperty, 1.07, 0.28, 0.6);
+        };
+        root.MouseLeave += (_, _) =>
+        {
+            close.Visibility = Visibility.Collapsed;
+            if (!selected) bg.Background = White(0);
+            var (lift, _) = Motion.Transforms(root);
+            Motion.Spring(lift, ScaleTransform.ScaleXProperty, 1, 0.3, 0.75);
+            Motion.Spring(lift, ScaleTransform.ScaleYProperty, 1, 0.3, 0.75);
+        };
 
         // Click selects, double-click opens, dragging carries the item (or the whole selection) out.
         root.MouseLeftButtonDown += (_, e) =>
@@ -1477,8 +2141,57 @@ public partial class MainWindow : Window
         menu.Opened += (_, _) => { _menuOpen = true; _openMenu = menu; };
         menu.Closed += (_, _) => { _menuOpen = false; _openMenu = null; _leaveDelay.Start(); };
         root.ContextMenu = menu;
-        root.ContextMenuOpening += (_, _) => FillShelfMenu(menu, entry);
+        root.ContextMenuOpening += (_, _) => { FillShelfMenu(menu, entry); LockForMenu(); PlaceMenu(menu); };
         return root;
+    }
+
+    /// <summary>The moment a menu is asked for, the notch holds still: no opening or closing under it.</summary>
+    private void LockForMenu()
+    {
+        _hoverDelay.Stop();
+        _leaveDelay.Stop();
+        _peekTimer.Stop();
+        _menuOpen = true;
+    }
+
+    /// <summary>
+    /// Menus drop from just under the notch (or its open panel), centered, never at the mouse:
+    /// at the mouse they sat on top of the controls and moved with the panel's animation.
+    /// </summary>
+    private void PlaceMenu(ContextMenu menu)
+    {
+        // Anchored to the layout (fixed size), with the notch's *final* size: if it were anchored to the
+        // pill itself, the menu would slide along while the panel was still opening.
+        var L = Settings.Current.LayoutScale;                          // the layout
+        var k = L * Settings.Current.StateFactor(_expanded);           // the notch itself, at its size for this state
+        var fw = _target.Width > 0 ? _target.Width : NotchHost.ActualWidth;
+        var fh = _target.Height > 0 ? _target.Height : NotchHost.ActualHeight;
+        var gap = IslandShape ? IslandGap * L : 0;
+        double rw = Root.Width * L, rh = Root.Height * L;
+        menu.PlacementTarget = Root;
+        switch (Dock)
+        {
+            case "bottom":
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
+                menu.HorizontalOffset = rw / 2 - 126;
+                menu.VerticalOffset = rh - gap - fh * k - 2;
+                break;
+            case "left":
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Right;
+                menu.HorizontalOffset = gap + fw * k + 2 - rw;
+                menu.VerticalOffset = (rh - fh * k) / 2;
+                break;
+            case "right":
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Left;
+                menu.HorizontalOffset = rw - gap - fw * k - 2;
+                menu.VerticalOffset = (rh - fh * k) / 2;
+                break;
+            default:
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                menu.HorizontalOffset = rw / 2 - 126;
+                menu.VerticalOffset = gap + fh * k + 2 - rh;
+                break;
+        }
     }
 
     private void FillShelfMenu(ContextMenu menu, ShelfEntry entry)
@@ -1492,6 +2205,14 @@ public partial class MainWindow : Window
             if (entry.Kind == "file" && !many)
                 menu.Items.Add(Item(L("showInExplorer"), "\uE838", () => Process.Start("explorer.exe", $"/select,\"{entry.Value}\"")));
             menu.Items.Add(Item(many ? string.Format(L("copyN"), group.Count) : L("copy"), "\uE8C8", () => CopyToClipboard(group)));
+            if (group.Any(e => e.Kind == "file"))
+                menu.Items.Add(Item(L("zip"), "\uE8B7", () => Zip(group)));
+            if (group.Any(IsImage))
+            {
+                menu.Items.Add(Item(L("convertPng"), "\uEB9F", () => ConvertImages(group, "png", 1)));
+                menu.Items.Add(Item(L("convertJpeg"), "\uEB9F", () => ConvertImages(group, "jpg", 1)));
+                menu.Items.Add(Item(L("halfSize"), "\uE9A6", () => ConvertImages(group, null, 0.5)));
+            }
             menu.Items.Add(new Separator());
             if (_selected.Count < _shelf.Items.Count)
                 menu.Items.Add(Item(L("selectAll"), "\uE8B3", () => { _selected.UnionWith(_shelf.Items); Refresh(); }));
@@ -1598,14 +2319,15 @@ public partial class MainWindow : Window
         var down = Native.LeftButtonDown;
         var (x, y) = Native.Cursor;
         var cursor = new Point(x, y);
-        bool In(double left, double top, double right, double bottom)
+        bool In((double left, double top, double right, double bottom) z)
         {
+            var (left, top, right, bottom) = z;
             if (PresentationSource.FromVisual(Root) == null) return false;
             var a = Root.PointToScreen(new Point(left, top));
             var b = Root.PointToScreen(new Point(right, bottom));
             return cursor.X >= a.X && cursor.X <= b.X && cursor.Y >= a.Y && cursor.Y <= b.Y;
         }
-        var hot = _expanded || _menuOpen || down || In(-80, 0, Root.Width + 80, 260);
+        var hot = _expanded || _menuOpen || down || _moving || In(Zone(260, -80));
         _dragPoll.Interval = TimeSpan.FromMilliseconds(hot ? 33 : 250);
 
         // Only for a real drag: held a moment and moved. A click or double-click near the top
@@ -1615,13 +2337,22 @@ public partial class MainWindow : Window
         var dragged = _pressStart is var (at, from)
                       && (DateTime.UtcNow - at).TotalMilliseconds > 150
                       && Math.Abs(cursor.X - from.X) + Math.Abs(cursor.Y - from.Y) > 12;
-        var catcher = dragged && !_draggingOut && !_hiddenForFullScreen && In(20, 0, Root.Width - 20, 220);
+        var catcher = dragged && !_draggingOut && !_moving && !_hiddenForFullScreen && In(Zone(220, 20));
         DragCatcher.Visibility = catcher || _dragging ? Visibility.Visible : Visibility.Collapsed;
         UpdateCompact();
         if (!down && _dragging) EndDrag();
     }
 
     private (DateTime At, Point From)? _pressStart;
+
+    /// <summary>A band along the notch's edge of the layout, <paramref name="depth"/> deep, trimmed (or grown) by <paramref name="inset"/> at both ends.</summary>
+    private (double Left, double Top, double Right, double Bottom) Zone(double depth, double inset) => Dock switch
+    {
+        "bottom" => (inset, Root.Height - depth, Root.Width - inset, Root.Height),
+        "left" => (0, inset, depth, Root.Height - inset),
+        "right" => (Root.Width - depth, inset, Root.Width, Root.Height - inset),
+        _ => (inset, 0, Root.Width - inset, depth),
+    };
 
     /// <summary>
     /// The cursor's real position settles hovering, as on the Mac (it polls the mouse too). Windows
@@ -1630,7 +2361,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void CheckHover()
     {
-        if (_menuOpen || _seeking || _settingVolume || _dragging)
+        if (_menuOpen || _seeking || _settingVolume || _dragging || _moving)
         {
             if (DateTime.UtcNow - _blockedTraceAt > TimeSpan.FromSeconds(1))
             {
@@ -1639,6 +2370,7 @@ public partial class MainWindow : Window
             }
             return;
         }
+        FollowMouse();
         var over = CursorOnNotch();
         // Entering only with no button held: moving a window or selecting text along the top isn't hovering.
         if (over && !_inside && !Native.LeftButtonDown && !Native.RightButtonDown) OnEnter();
@@ -1647,23 +2379,101 @@ public partial class MainWindow : Window
 
     private DateTime _blockedTraceAt;
 
+    /// <summary>"Follow the mouse": touching the top edge of another screen brings the notch there.</summary>
+    private void FollowMouse()
+    {
+        if (Settings.Current.Display != "follow" || _expanded || _inside || _dragging || _hiddenForFullScreen) return;
+        var (x, y) = Native.Cursor;
+        if (x == int.MinValue || Displays.At(x, y) is not { } s || s.Id == _screen?.Id || y - s.Top > 6) return;
+        _screen = s;
+        PlaceWindow();
+    }
+
+    // MARK: - Updates (once a day, only if turned on)
+
+    private bool _updating;
+
+    private async void CheckUpdate()
+    {
+        var s = Settings.Current;
+        var today = DateTime.Now.ToString("yyyy-MM-dd");
+        if (!s.CheckUpdates || s.LastUpdateCheck == today || _updating || _hiddenForFullScreen) return;
+        _updating = true;
+        try
+        {
+            var found = await Updater.CheckAsync();
+            s.LastUpdateCheck = today;
+            s.Save();
+            if (found != null) ShowToast("\uE896", L("updateAvailable"), "v" + found, ok: true, seconds: 4);
+        }
+        finally { _updating = false; }
+    }
+
+    // MARK: - Images
+
+    private static bool IsImage(ShelfEntry e) => e.Kind == "file" && ShelfActions.IsImage(e.Value);
+
+    /// <summary>Quick actions on pictures: to PNG or JPEG, or half the size. The result sits beside the original and goes on the shelf.</summary>
+    private async void ConvertImages(List<ShelfEntry> group, string? format, double scale)
+    {
+        var sources = group.Where(IsImage).Select(e => e.Value).ToList();
+        if (sources.Count == 0) return;
+        try
+        {
+            var made = await Task.Run(() => ShelfActions.Convert(sources, format, scale));
+            foreach (var path in made) _shelf.Add(new ShelfEntry("file", path));
+            Refresh();
+            ShowToast("\uEB9F", L("converted"), made.Count == 1 ? System.IO.Path.GetFileName(made[0]) : $"{made.Count}", ok: true);
+        }
+        catch (Exception ex)
+        {
+            App.Log(ex);
+            ShowToast("\uE7BA", L("convertFailed"), "", ok: false);
+        }
+    }
+
+    // MARK: - ZIP
+
+    private async void Zip(List<ShelfEntry> group)
+    {
+        var paths = group.Where(e => e.Kind == "file" && (File.Exists(e.Value) || Directory.Exists(e.Value))).Select(e => e.Value).ToList();
+        if (paths.Count == 0) return;
+        try
+        {
+            var zip = await Task.Run(() => ShelfActions.Zip(paths));
+            _shelf.Add(new ShelfEntry("file", zip));
+            Refresh();
+            ShowToast("\uE8B7", L("zipCreated"), System.IO.Path.GetFileName(zip), ok: true);
+        }
+        catch (Exception ex)
+        {
+            App.Log(ex);
+            ShowToast("\uE7BA", L("zipFailed"), "", ok: false);
+        }
+    }
+
     private bool CursorOnNotch()
     {
         var (x, y) = Native.Cursor;
         if (x == int.MinValue || PresentationSource.FromVisual(NotchHost) == null) return false;
         var p = NotchHost.PointFromScreen(new Point(x, y));
-        return p.X >= 0 && p.X <= NotchHost.ActualWidth && p.Y >= 0 && p.Y <= NotchHost.ActualHeight;
+        // Flicking the mouse to the very edge must reach a floating island too.
+        var gap = IslandShape ? IslandGap + 2 : 0;
+        var d = Dock;
+        return p.X >= (d == "left" ? -gap : 0) && p.X <= NotchHost.ActualWidth + (d == "right" ? gap : 0)
+               && p.Y >= (d == "top" ? -gap : 0) && p.Y <= NotchHost.ActualHeight + (d == "bottom" ? gap : 0);
     }
 
     private void OnEnter()
     {
-        if (_inside) return;
+        if (_inside || _moving) return;
         App.Trace("enter");
         _inside = true;
         _leaveDelay.Stop();
         _peeking = false;
         if (!_expanded) _hoverDelay.Start();
         UpdateLift();
+        UpdateIdle();
     }
 
     private void OnLeave()
@@ -1674,6 +2484,7 @@ public partial class MainWindow : Window
         _hoverDelay.Stop();
         if (!_leaveDelay.IsEnabled) _leaveDelay.Start();
         UpdateLift();
+        UpdateIdle();
     }
 
     /// <summary>
@@ -1725,7 +2536,8 @@ public partial class MainWindow : Window
     {
         // DragLeave also fires when moving between child elements; only react when really outside.
         var p = e.GetPosition(Root);
-        var inCatcher = DragCatcher.IsVisible && p.X >= 20 && p.X <= Root.Width - 20 && p.Y >= 0 && p.Y <= 220;
+        var z = Zone(220, 20);
+        var inCatcher = DragCatcher.IsVisible && p.X >= z.Left && p.X <= z.Right && p.Y >= z.Top && p.Y <= z.Bottom;
         var n = e.GetPosition(NotchHost);
         var inNotch = n.X >= 0 && n.Y >= 0 && n.X <= NotchHost.ActualWidth && n.Y <= NotchHost.ActualHeight;
         if (!inCatcher && !inNotch) EndDrag();
@@ -1804,30 +2616,39 @@ public partial class MainWindow : Window
         Header = text, IsEnabled = false, Style = (Style)Application.Current.Resources["MenuHeader"],
     };
 
+    /// <summary>
+    /// A size dot is being dragged in Settings: the open one keeps the panel open (and lets it close after),
+    /// the closed one closes it, so each can be seen changing.
+    /// </summary>
+    public void PreviewSize(bool open, bool start)
+    {
+        if (open && start) { _hoverOpen = true; UpdateExpanded(); }
+        else if (open) { _hoverOpen = false; _leaveDelay.Start(); }
+        else if (start) { _hoverOpen = false; UpdateExpanded(); }
+    }
+
     /// <summary>The notch's right-click menu, built when it opens (same sections as the Mac's).</summary>
     private void BuildMenu()
     {
-        var s = Settings.Current;
         var menu = NotchHost.ContextMenu!;
         menu.Items.Clear();
-        if (s.OcrEnabled)
+        if (Settings.Current.OcrEnabled)
         {
             menu.Items.Add(Item(L("copyTextFromScreen"), "\uE8C8", () => Dispatcher.BeginInvoke(CopyTextFromScreen), gesture: "Ctrl+Shift+2"));
             menu.Items.Add(new Separator());
         }
-
-        menu.Items.Add(Header(L("behavior")));
-        menu.Items.Add(Item(L("peekOnTrack"), "\uEC4F", () => { s.PeekOnTrackChange = !s.PeekOnTrackChange; s.Save(); }, s.PeekOnTrackChange));
-        menu.Items.Add(Item(L("volumeHud"), "\uE995", () => { s.VolumeHud = !s.VolumeHud; s.Save(); }, s.VolumeHud));
-        menu.Items.Add(Item(L("launchAtLogin"), "\uE706", () => Settings.LaunchAtLogin = !Settings.LaunchAtLogin, Settings.LaunchAtLogin));
-        var addons = new MenuItem { Header = L("addons"), Icon = Icons.Glyph("\uEA86", 14, Brushes.White) };
-        addons.Items.Add(Item(L("addonOCR"), "\uE8C8", () => { s.OcrEnabled = !s.OcrEnabled; s.Save(); }, s.OcrEnabled));
-        addons.Items.Add(Item(L("addonLyrics"), "\uE8D6", () => { s.LyricsEnabled = !s.LyricsEnabled; s.Save(); }, s.LyricsEnabled));
-        menu.Items.Add(addons);
-        menu.Items.Add(new Separator());
-
         if (_shelf.Items.Count > 0)
             menu.Items.Add(Item(L("clearShelf"), "\uE74D", () => RemoveFromShelf(_shelf.Items.ToList())));
+        menu.Items.Add(Item(L("movePosition"), "\uE7C2", BeginMoveLater));
+        var hide = new MenuItem { Header = L("hideFor"), Icon = Icons.Glyph("\uED1A", 14, Brushes.White) };
+        hide.Items.Add(Item(L("min15"), null, () => Snooze(TimeSpan.FromMinutes(15))));
+        hide.Items.Add(Item(L("hour1"), null, () => Snooze(TimeSpan.FromHours(1))));
+        hide.Items.Add(Item(L("untilReopen"), null, () => Snooze(TimeSpan.FromDays(3650))));
+        menu.Items.Add(hide);
+        if (Updater.NewVersion is { } v)
+            menu.Items.Add(Item(string.Format(L("downloadUpdate"), v), "\uE896", () => Process.Start(new ProcessStartInfo(Updater.ReleasesPage) { UseShellExecute = true })));
+        menu.Items.Add(new Separator());
+        // Everything else lives in Settings.
         menu.Items.Add(Item(L("settings"), "\uE713", SettingsWindow.ShowOrFocus));
         menu.Items.Add(Item(L("quit"), "\uE7E8", () => Application.Current.Shutdown()));
     }

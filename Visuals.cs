@@ -119,6 +119,16 @@ public static class Motion
             surface.BeginAnimation(UIElement.OpacityProperty, Ease(1, 0.12, from: 0, ease: new QuadraticEase { EasingMode = EasingMode.EaseOut }));
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, SpringEase.To(1, 0.25, 0.85, from: 0.96));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, SpringEase.To(1, 0.25, 0.85, from: 0.96));
+            // The rows follow one after another, each rising a little.
+            var n = 0;
+            foreach (var row in m.Items.OfType<UIElement>().Take(16))
+            {
+                var move = new TranslateTransform(0, 7);
+                row.RenderTransform = move;
+                var delay = 0.02 + n++ * 0.02;
+                move.BeginAnimation(TranslateTransform.YProperty, SpringEase.To(0, 0.3, 0.8, delay, 7));
+                row.BeginAnimation(UIElement.OpacityProperty, Ease(1, 0.18, delay, 0));
+            }
         }));
 
     /// <summary>Called once at startup: timelines that don't set a rate use the screen's.</summary>
@@ -152,6 +162,12 @@ public static class Motion
         Timeline.SetDesiredFrameRate(a, Fps);
         return a;
     }
+
+    /// <summary>Settings → Motion: calm is slower and softer, lively quicker.</summary>
+    public static double Speed => Settings.Current.Motion switch { "calm" => 1.3, "lively" => 0.82, _ => 1.0 };
+
+    /// <summary>Calm settles without wobbling, Lively overshoots and rings a little longer.</summary>
+    public static double Bounce => Settings.Current.Motion switch { "calm" => 0.1, "lively" => -0.13, _ => 0.0 };
 
     public static void Spring(UIElement e, DependencyProperty p, double to, double response, double damping) =>
         e.BeginAnimation(p, SpringEase.To(to, response, damping));
@@ -228,9 +244,8 @@ public sealed class BarsView : Canvas
     /// <summary>Elevated style: the bars glow in the album's color.</summary>
     public void SetGlow(bool on, Color color)
     {
-        if (!on) { Effect = null; return; }
-        if (Effect is not DropShadowEffect glow) Effect = glow = new DropShadowEffect { ShadowDepth = 0, BlurRadius = 6, Opacity = 0.7 };
-        glow.BeginAnimation(DropShadowEffect.ColorProperty, new ColorAnimation(color, TimeSpan.FromSeconds(0.5)));
+        // A blur around bars that redraw every frame costs more than it gives: the pill's own rim carries the glow.
+        Effect = null;
     }
 
     public bool Playing
